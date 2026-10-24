@@ -2,6 +2,25 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+if [ "${1:-}" = "--user" ]; then
+    shift
+elif command -v pacman >/dev/null 2>&1; then
+    cd "$ROOT/pkgbuild"
+    exec makepkg -fsi "$@"
+fi
+
+command -v python3 >/dev/null 2>&1 || { echo "Install python3 to create the desktop launcher." >&2; exit 1; }
 "$ROOT/bin/build"
-cd "$ROOT/pkgbuild"
-exec makepkg -fsi "$@"
+prefix="${PREFIX:-$HOME/.local}"
+install -Dm755 "$ROOT/build/quota" "$prefix/bin/quota"
+install -Dm644 "$ROOT/pkgbuild/quota.svg" "$prefix/share/icons/hicolor/scalable/apps/quota.svg"
+mkdir -p "$prefix/share/applications"
+python3 - "$ROOT/pkgbuild/quota.desktop" "$prefix" <<'PYTHON'
+import pathlib, sys
+source, prefix = sys.argv[1:]
+command = str(pathlib.Path(prefix).resolve() / "bin/quota")
+command = command.replace("\\", "\\\\\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%")
+text = pathlib.Path(source).read_text().replace("Exec=quota", 'Exec="' + command + '"')
+(pathlib.Path(prefix) / "share/applications/quota.desktop").write_text(text)
+PYTHON
+printf 'Installed %s/bin/quota\n' "$prefix"

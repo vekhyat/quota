@@ -1,0 +1,28 @@
+name: Linux
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [archlinux:base, debian:bookworm, ubuntu:24.04]
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install dependencies
+        run: |
+          if command -v pacman >/dev/null; then
+            pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-wayland python
+          else
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y git build-essential qmake6 qt6-base-dev qt6-declarative-dev qt6-wayland python3 qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window qml6-module-qtqml-workerscript
+          fi
+      - uses: actions/checkout@v4
+      - run: bin/build
+      - run: bin/test
+      - run: bin/smoke
+      - name: Verify user installation
+        run: |
+          PREFIX="$RUNNER_TEMP/quota install" bin/install --user
+          test -x "$RUNNER_TEMP/quota install/bin/quota"
+          test -s "$RUNNER_TEMP/quota install/share/applications/quota.desktop"

@@ -112,7 +112,7 @@ private slots:
 
     void reportedCostWinsWhenTheModelHasNoRate()
     {
-        const UsageWindow window = makeUsageWindow(1, QDateTime::fromMSecsSinceEpoch(1'000'000, QTimeZone::utc()), QTimeZone("UTC"));
+        const UsageWindow window = makeUsageWindow(1, QDateTime::fromMSecsSinceEpoch(1000000, QTimeZone("UTC")), QTimeZone("UTC"));
         const UsageRec rec{500000, "pi", "local-model", {}, 10, 0, 0, 10, 1.25, 0, {}};
         const UsageSummary summary = summarizeUsage({rec}, {}, window, QTimeZone("UTC"));
         QCOMPARE(summary.total.cost, 1.25);
@@ -155,6 +155,24 @@ private slots:
         QCOMPARE(session->usedPercent, 54.0);
         QCOMPARE(week->usedPercent, 100.0);
         QVERIFY(spend->usedPercent > 9.0 && spend->usedPercent < 9.3);
+    }
+
+    void codexHomesIncludeAccountsWithoutHistory()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString home = dir.path();
+        QVERIFY(QDir().mkpath(home + "/.codex"));
+        QVERIFY(writeFile(home + "/.codex-work/auth.json", "{}"));
+        QVERIFY(QDir().mkpath(home + "/.codex-unused"));
+        QVERIFY(QDir().mkpath(home + "/custom account/sessions"));
+        QVERIFY(QFile::link(home + "/.codex-work", home + "/.codex-link"));
+        QVERIFY(writeFile(home + "/sources", "codex ~/custom account/sessions\ncodex ~/.codex-work\n# comment\n"));
+        const auto homes = discoverCodexHomes(home, home + "/.codex", home + "/sources");
+        QCOMPARE(homes.size(), 3);
+        QVERIFY(homes.contains(home + "/.codex"));
+        QVERIFY(homes.contains(home + "/.codex-work"));
+        QVERIFY(homes.contains(home + "/custom account"));
     }
 
     void codexLimitsUseTheCodexBucket()
@@ -475,7 +493,7 @@ private slots:
         const QString bundle = dir.filePath("bundle.json");
         QVERIFY(writeFile(bundle, R"({"claude-opus":{"input_cost_per_token":0.001,"output_cost_per_token":0.002}})"));
         const QString cache = dir.filePath("cache");
-        const qint64 now = 10'000'000'000;
+        const qint64 now = 10000000000;
         bool fetched = false;
         const RateLoad bundled = loadModelRates(cache, bundle, now, {});
         QCOMPARE(bundled.origin, QString("bundled"));

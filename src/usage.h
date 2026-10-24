@@ -76,6 +76,7 @@ struct LimitWindow {
     QString extra;
     double usedPercent = 0;
     QString resetsAt;
+    QString account = {};
 };
 
 QHash<QString, ModelRate> parseRateTable(const QJsonObject &document);

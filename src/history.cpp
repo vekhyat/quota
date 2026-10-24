@@ -798,6 +798,35 @@ void addFolder(QStringList *list, const QString &folder)
 }
 }
 
+QStringList discoverCodexHomes(const QString &home, const QString &primaryHome, const QString &sourcesFile)
+{
+    QStringList homes;
+    const auto add = [&](QString path) {
+        path = expandHome(path, home);
+        if (QFileInfo(path).fileName() == "sessions")
+            path = QFileInfo(path).absolutePath();
+        const QFileInfo info(path);
+        if (info.isDir())
+            addFolder(&homes, info.canonicalFilePath());
+    };
+    add(primaryHome);
+    for (const QString &name : QDir(home).entryList({".codex*"}, QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot)) {
+        const QString path = QDir(home).filePath(name);
+        if (QFileInfo::exists(path + "/auth.json") || QFileInfo(path + "/sessions").isDir())
+            add(path);
+    }
+    QFile file(sourcesFile);
+    if (file.open(QIODevice::ReadOnly)) {
+        for (const QString &raw : QString::fromUtf8(file.readAll()).split('\n')) {
+            const QString line = raw.trimmed();
+            const int space = line.indexOf(QRegularExpression("\\s"));
+            if (space > 0 && line.left(space).compare("codex", Qt::CaseInsensitive) == 0)
+                add(line.mid(space).trimmed());
+        }
+    }
+    return homes;
+}
+
 HistorySources discoverSources(const QString &home, const QString &claudeDir, const QString &codexHome,
                                const QString &grokHome, const QString &sourcesFile)
 {

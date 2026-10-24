@@ -12,6 +12,8 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QStandardPaths>
+#include <QProcessEnvironment>
+#include <memory>
 #include <QTimeZone>
 #include <QtConcurrent>
 
@@ -44,6 +46,11 @@ QString firstEnv(const char *first, const char *second, const QString &fallback)
 
 Backend::~Backend()
 {
+    for (QProcess *process : findChildren<QProcess *>(QString(), Qt::FindDirectChildrenOnly)) {
+        process->disconnect(this);
+        process->kill();
+        process->waitForFinished(1000);
+    }
     if (!m_rateReply)
         return;
     m_rateReply->disconnect(this);
@@ -52,10 +59,11 @@ Backend::~Backend()
 
 Backend::Backend(bool preview, QObject *parent) : QObject(parent), m_preview(preview)
 {
+    m_network.setTransferTimeout(15000);
     m_t3Home = homePath("QUOTA_T3_HOME", QDir::homePath() + "/.t3");
     m_claudeDir = firstEnv("QUOTA_CLAUDE_DIR", "CLAUDE_CONFIG_DIR", QDir::homePath() + "/.claude");
     m_codexHome = firstEnv("QUOTA_CODEX_HOME", "CODEX_HOME", QDir::homePath() + "/.codex");
-    m_cacheDir = homePath("QUOTA_CACHE_DIR", QDir::homePath() + "/.cache/quota");
+    m_cacheDir = homePath("QUOTA_CACHE_DIR", QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation) + "/quota");
     m_sourcesFile = homePath("QUOTA_SOURCES_FILE",
                              QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + "/quota/sources");
     m_grokHome = homePath("QUOTA_GROK_HOME", QDir::homePath() + "/.grok");
@@ -139,8 +147,10 @@ void Backend::refresh()
         m_limitRows = {{"claude", "session", {}, 42, at(100)},
                        {"claude", "weekly", {}, 18, at(3 * 24 * 60)},
                        {"claude", "weekly", "Opus", 64, at(3 * 24 * 60)},
-                       {"codex", "session", {}, 81, at(180)},
-                       {"codex", "weekly", {}, 11, at(5 * 24 * 60)}};
+                       {"codex", "session", {}, 81, at(180), "~/.codex-personal"},
+                       {"codex", "weekly", {}, 11, at(5 * 24 * 60), "~/.codex-personal"},
+                       {"codex", "session", {}, 23, at(120), "~/.codex-work"},
+                       {"codex", "weekly", {}, 46, at(4 * 24 * 60), "~/.codex-work"}};
         m_cacheAt = now.addSecs(-14 * 60).toMSecsSinceEpoch();
         m_limitsAt = now.addSecs(-2 * 60).toMSecsSinceEpoch();
         m_notices.clear();
@@ -384,6 +394,7 @@ void Backend::rebuild()
     for (const LimitWindow &row : m_limitRows) {
         m_limits.append(QVariantMap{{"provider", row.provider},
                                     {"kind", row.kind},
+                                    {"account", row.account},
                                     {"extra", row.extra},
                                     {"used", row.usedPercent},
                                     {"left", 100 - row.usedPercent},
@@ -561,7 +572,36 @@ static QString jwtAccountId(const QString &jwt)
 
 void Backend::readCodex(int generation)
 {
-    QFile authFile(m_codexHome + "/auth.json");
+    QStringList homes = discoverCodexHomes(QDir::homePath(), m_codexHome, m_sourcesFile);
+    if (homes.isEmpty())
+        homes.append(m_codexHome);
+    m_probes += homes.size() - 1;
+    for (qsizetype i = m_limitRows.size(); i-- > 0;)
+        if (m_limitRows[i].provider == "codex")
+            m_limitRows.removeAt(i);
+    for (const QString &code : QStringList(m_notices))
+        if (code.startsWith("codex-failed"))
+            note(code, false);
+    for (const QString &home : homes)
+        readCodexHome(home, generation);
+}
+
+void Backend::finishCodex(const QString &home, const QVector<LimitWindow> &rows, int generation)
+{
+    if (generation != m_generation)
+        return;
+    note("codex-failed:" + home, rows.isEmpty());
+    for (LimitWindow row : rows) {
+        row.account = home;
+        m_limitRows.append(row);
+    }
+    rebuild();
+    finishProbe(generation);
+}
+
+void Backend::readCodexHome(const QString &home, int generation)
+{
+    QFile authFile(home + "/auth.json");
     QString token;
     QString accountId;
     if (authFile.open(QIODevice::ReadOnly)) {
@@ -582,7 +622,7 @@ void Backend::readCodex(int generation)
         request.setRawHeader("Accept", "application/json");
         request.setRawHeader("User-Agent", "codex-cli");
         QNetworkReply *reply = m_network.get(request);
-        connect(reply, &QNetworkReply::finished, this, [this, reply, generation] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, generation, home] {
             reply->deleteLater();
             if (generation != m_generation)
                 return;
@@ -590,94 +630,68 @@ void Backend::readCodex(int generation)
             const QJsonObject body = QJsonDocument::fromJson(reply->readAll()).object();
             const QVector<LimitWindow> parsed = status >= 200 && status < 300 ? parseCodexWham(body) : QVector<LimitWindow>{};
             if (!parsed.isEmpty()) {
-                note("codex-failed", false);
-                QVector<LimitWindow> next;
-                for (const LimitWindow &row : m_limitRows)
-                    if (row.provider != "codex")
-                        next.append(row);
-                next += parsed;
-                m_limitRows = next;
-                finishProbe(generation);
+                finishCodex(home, parsed, generation);
                 return;
             }
-            readCodexAppServer(generation);
+            readCodexAppServer(home, generation);
         });
         return;
     }
-    readCodexAppServer(generation);
+    readCodexAppServer(home, generation);
 }
 
-void Backend::readCodexAppServer(int generation)
+void Backend::readCodexAppServer(const QString &home, int generation)
 {
-    if (m_codex) {
-        m_codex->disconnect(this);
-        m_codex->kill();
-        m_codex->deleteLater();
-        m_codex = nullptr;
-    }
-    m_codexBuf.clear();
-    m_codexStep = 0;
-    m_codex = new QProcess(this);
-    m_codex->setProcessChannelMode(QProcess::SeparateChannels);
-    connect(m_codex, &QProcess::readyReadStandardOutput, this, [this, generation] {
-        if (!m_codex)
+    auto *process = new QProcess(this);
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("CODEX_HOME", home);
+    process->setProcessEnvironment(environment);
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    auto buffer = std::make_shared<QByteArray>();
+    auto step = std::make_shared<int>(0);
+    const auto finish = [this, process, step, home, generation](const QVector<LimitWindow> &rows) {
+        if (*step == 2)
             return;
-        m_codexBuf += m_codex->readAllStandardOutput();
-        while (true) {
-            const int end = m_codexBuf.indexOf('\n');
-            if (end < 0)
-                return;
-            const QByteArray line = m_codexBuf.left(end);
-            m_codexBuf.remove(0, end + 1);
+        *step = 2;
+        process->disconnect(this);
+        if (process->state() == QProcess::NotRunning)
+            process->deleteLater();
+        else {
+            connect(process, &QProcess::finished, process, &QObject::deleteLater);
+            process->kill();
+        }
+        finishCodex(home, rows, generation);
+    };
+    connect(process, &QProcess::readyReadStandardOutput, this, [process, buffer, step, finish] {
+        *buffer += process->readAllStandardOutput();
+        while (buffer->contains('\n')) {
+            const int end = buffer->indexOf('\n');
+            const QByteArray line = buffer->left(end);
+            buffer->remove(0, end + 1);
             const QJsonObject msg = QJsonDocument::fromJson(line).object();
-            if (msg.value("id").toInt() == 1 && m_codexStep == 0) {
-                m_codexStep = 1;
-                m_codex->write("{\"method\":\"initialized\"}\n");
-                m_codex->write("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":null}\n");
-            } else if (msg.value("id").toInt() == 2 && m_codexStep == 1) {
-                m_codexStep = 2;
-                note("codex-failed", msg.contains("error"));
-                if (!msg.contains("error")) {
-                    QVector<LimitWindow> next;
-                    for (const LimitWindow &row : m_limitRows)
-                        if (row.provider != "codex")
-                            next.append(row);
-                    next += parseCodexLimits(msg.value("result").toObject());
-                    m_limitRows = next;
+            if (msg.value("id").toInt() == 1 && *step == 0) {
+                if (msg.contains("error")) {
+                    finish({});
+                    return;
                 }
-                m_codexStep = 3;
-                m_codex->kill();
-                finishProbe(generation);
+                *step = 1;
+                process->write("{\"method\":\"initialized\"}\n");
+                process->write("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":null}\n");
+            } else if (msg.value("id").toInt() == 2 && *step == 1) {
+                finish(msg.contains("error") ? QVector<LimitWindow>{} : parseCodexLimits(msg.value("result").toObject()));
+                return;
             }
         }
+        if (buffer->size() > 1024 * 1024)
+            finish({});
     });
-    connect(m_codex, &QProcess::finished, this, [this, generation] {
-        if (m_codexStep < 2) {
-            note("codex-failed", true);
-            m_codexStep = 3;
-            finishProbe(generation);
-        }
+    connect(process, &QProcess::readyReadStandardError, process, [process] { process->readAllStandardError(); });
+    connect(process, &QProcess::finished, this, [finish] { finish({}); });
+    connect(process, &QProcess::errorOccurred, this, [finish](QProcess::ProcessError) { finish({}); });
+    QTimer::singleShot(15000, process, [finish] { finish({}); });
+    connect(process, &QProcess::started, this, [process] {
+        process->write("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"quota\",\"title\":\"Quota\","
+                       "\"version\":\"0.3.0\"},\"capabilities\":{\"experimentalApi\":true}}}\n");
     });
-    connect(m_codex, &QProcess::errorOccurred, this, [this, generation](QProcess::ProcessError error) {
-        if (error != QProcess::FailedToStart || m_codexStep >= 2)
-            return;
-        note("codex-failed", true);
-        m_codexStep = 3;
-        finishProbe(generation);
-    });
-    QTimer::singleShot(15000, m_codex, [this, generation] {
-        if (!m_codex || m_codexStep >= 2)
-            return;
-        note("codex-failed", true);
-        m_codexStep = 3;
-        m_codex->kill();
-        finishProbe(generation);
-    });
-    m_codex->start(m_codexBin, {"app-server"});
-    connect(m_codex, &QProcess::started, this, [this] {
-        const QByteArray hello =
-            "{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"quota\",\"title\":\"Quota\","
-            "\"version\":\"0.2.0\"},\"capabilities\":{\"experimentalApi\":true}}}\n";
-        m_codex->write(hello);
-    });
+    process->start(m_codexBin, {"app-server"});
 }

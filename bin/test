@@ -5,6 +5,12 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 mkdir -p "$ROOT/build/tests"
 cd "$ROOT/build/tests"
 
-qmake6 "$ROOT/tests/quota_tests.pro"
-make -j"$(nproc)"
+"${QMAKE:-qmake6}" "$ROOT/tests/quota_tests.pro"
+make -j"${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
 QT_QPA_PLATFORM=offscreen ./quota_tests
+
+mkdir -p "$ROOT/build/backend-tests"
+cd "$ROOT/build/backend-tests"
+"${QMAKE:-qmake6}" "$ROOT/tests/backend_tests.pro"
+make -j"${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
+./backend_tests

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+workspace="$(mktemp -d)"
+trap 'rm -rf "$workspace"' EXIT HUP INT TERM
+mkdir -p "$workspace/home" "$workspace/runtime"
+chmod 700 "$workspace/runtime"
+HOME="$workspace/home" XDG_CONFIG_HOME="$workspace/home/.config" \
+XDG_CACHE_HOME="$workspace/home/.cache" XDG_RUNTIME_DIR="$workspace/runtime" \
+QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+"$ROOT/build/quota" --preview "$workspace/preview.png" 960x1100
+test -s "$workspace/preview.png"
+printf 'UI rendered successfully with an empty home and software graphics.\n'

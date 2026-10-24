@@ -43,6 +43,8 @@ HistoryScan scanHistory(const HistorySources &sources, const QString &cacheDir, 
 // Scans one Claude home and one Codex home.
 HistoryScan scanHistory(const QString &claudeDir, const QString &codexHome, const QString &cacheDir, qint64 nowMs = 0);
 
+QStringList discoverCodexHomes(const QString &home, const QString &primaryHome, const QString &sourcesFile);
+
 struct RateLoad {
     QHash<QString, ModelRate> rates;
     // download, cache, bundled, or empty when every source failed.

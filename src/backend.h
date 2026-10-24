@@ -66,7 +66,9 @@ private:
     void requestClaude(const QString &token, int generation);
     void readGrok(int generation);
     void readCodex(int generation);
-    void readCodexAppServer(int generation);
+    void readCodexHome(const QString &home, int generation);
+    void readCodexAppServer(const QString &home, int generation);
+    void finishCodex(const QString &home, const QVector<LimitWindow> &rows, int generation);
     void finishProbe(int generation);
     void note(const QString &code, bool on);
     QString readTokenFile(const QString &path, const QString &objectKey, const QString &field) const;
@@ -107,9 +109,6 @@ private:
     QString m_claudeBin;
     QString m_claudeVersion;
     QNetworkAccessManager m_network;
-    QProcess *m_codex = nullptr;
-    QByteArray m_codexBuf;
-    int m_codexStep = 0;
     QFileSystemWatcher m_watcher;
     QTimer m_cacheDebounce;
     QTimer m_historyDebounce;

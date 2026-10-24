@@ -1,10 +1,10 @@
 pkgname=quota
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Show limits, usage, and cost'
 arch=('x86_64' 'aarch64')
 license=('MIT')
-depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'xdg-desktop-portal')
+depends=('qt6-base>=6.4' 'qt6-declarative>=6.4' 'qt6-wayland' 'gcc-libs' 'glibc')
 conflicts=('quota-tools')
 makedepends=('gcc' 'make')
 source=()
@@ -15,7 +15,15 @@ build() {
   ./bin/build
 }
 
+check() {
+  cd "$startdir/.."
+  ./bin/test
+}
+
 package() {
+  local qt_version
+  qt_version="$("${QMAKE:-qmake6}" -query QT_VERSION)"
+  depends=("qt6-base>=$qt_version" "qt6-declarative>=$qt_version" 'qt6-wayland' 'gcc-libs' 'glibc')
   cd "$startdir/.."
   install -Dm755 build/quota "$pkgdir/usr/bin/quota"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

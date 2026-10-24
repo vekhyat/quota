@@ -344,7 +344,7 @@ static QString isoReset(const QJsonValue &value)
     if (value.isString() && !value.toString().isEmpty())
         return value.toString();
     if (value.isDouble() && value.toDouble() > 0) {
-        return QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(value.toDouble()) * 1000, QTimeZone::utc())
+        return QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(value.toDouble()) * 1000, QTimeZone("UTC"))
             .toString(Qt::ISODateWithMs);
     }
     return {};

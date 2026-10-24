@@ -15,7 +15,6 @@ ApplicationWindow {
 
     Material.theme: Material.Dark
     Material.accent: theme.accent
-    Material.roundedScale: theme.radius
 
     readonly property color bg: "#0e0e10"
     readonly property color surface: "#151518"
@@ -316,6 +315,8 @@ ApplicationWindow {
             return qsTr("Claude login expired. Open Claude Code to renew it, then press Refresh.")
         if (code.indexOf("claude-http-") === 0)
             return qsTr("Claude limits check failed. HTTP %1.").arg(code.slice(12))
+        if (code.indexOf("codex-failed:") === 0)
+            return qsTr("Codex limits unavailable for %1. Sign in to that profile and refresh.").arg(code.slice(13))
         if (code === "codex-failed")
             return qsTr("Codex did not report limits. Press Refresh.")
         if (code === "grok-login")
@@ -347,12 +348,64 @@ ApplicationWindow {
         return rows
     }
 
+    function accountLabel(path) {
+        var name = path.split("/").pop()
+        if (name === ".codex")
+            return qsTr("Default")
+        name = name.replace(/^\.?codex[-_]?/i, "").replace(/[-_]+/g, " ").trim()
+        if (!name)
+            return qsTr("Default")
+        if (/^[0-9]+$/.test(name))
+            return qsTr("Account %1").arg(name)
+        return name.charAt(0).toUpperCase() + name.slice(1)
+    }
+
+    function limitCards() {
+        var cards = []
+        for (var p = 0; p < providerOrder.length; ++p) {
+            var provider = providerOrder[p]
+            var rows = limitsFor(provider)
+            if (provider !== "codex") {
+                cards.push({ provider: provider, account: "", title: providerLabel(provider),
+                               rows: rows, problem: providerNotice(provider) })
+                continue
+            }
+            var accounts = []
+            for (var r = 0; r < rows.length; ++r) {
+                var account = rows[r].account || ""
+                if (accounts.indexOf(account) < 0)
+                    accounts.push(account)
+            }
+            for (var n = 0; n < backend.notices.length; ++n) {
+                var code = backend.notices[n]
+                if (code.indexOf("codex-failed:") === 0 && accounts.indexOf(code.slice(13)) < 0)
+                    accounts.push(code.slice(13))
+                else if (code === "codex-failed" && accounts.indexOf("") < 0)
+                    accounts.push("")
+            }
+            accounts.sort()
+            for (var a = 0; a < accounts.length; ++a) {
+                var path = accounts[a]
+                var accountRows = []
+                for (var i = 0; i < rows.length; ++i)
+                    if ((rows[i].account || "") === path)
+                        accountRows.push(rows[i])
+                var failed = backend.notices.indexOf(path ? "codex-failed:" + path : "codex-failed") >= 0
+                cards.push({ provider: provider, account: path,
+                               title: path ? accountLabel(path) : providerLabel(provider),
+                               rows: accountRows,
+                               problem: failed ? qsTr("Limits unavailable. Sign in to this Codex profile, then refresh.") : "" })
+            }
+        }
+        return cards
+    }
+
     function providerNotice(id) {
         for (var i = 0; i < backend.notices.length; ++i) {
             var code = backend.notices[i]
             if (id === "claude" && (code === "claude-login" || code === "claude-failed" || code === "claude-empty" || code.indexOf("claude-http-") === 0))
                 return noticeText(code)
-            if (id === "codex" && code === "codex-failed")
+            if (id === "codex" && code.indexOf("codex-failed") === 0)
                 return noticeText(code)
             if (id === "grok" && (code === "grok-login" || code === "grok-failed" || code === "grok-key"))
                 return noticeText(code)
@@ -518,14 +571,15 @@ ApplicationWindow {
                     }
 
                     Repeater {
-                        model: win.providerOrder
+                        model: win.limitCards()
                         delegate: Rectangle {
                             id: card
-                            required property string modelData
-                            readonly property var rows: win.limitsFor(modelData)
-                            readonly property string problem: win.providerNotice(modelData)
+                            required property var modelData
+                            readonly property string provider: modelData.provider
+                            readonly property var rows: modelData.rows
+                            readonly property string problem: modelData.problem
                             // An API key is a choice, not a failure, so it reads as plain information.
-                            readonly property bool info: modelData === "grok" && backend.notices.indexOf("grok-key") >= 0
+                            readonly property bool info: provider === "grok" && backend.notices.indexOf("grok-key") >= 0
                             visible: rows.length > 0 || problem.length > 0
                             Layout.fillWidth: true
                             implicitHeight: cardBody.implicitHeight + 40
@@ -546,15 +600,33 @@ ApplicationWindow {
                                         implicitWidth: 10
                                         implicitHeight: 10
                                         radius: Math.min(5, theme.radius)
-                                        color: win.providerColor(card.modelData)
+                                        color: win.providerColor(card.provider)
                                     }
                                     Label {
-                                        text: win.providerLabel(card.modelData)
+                                        text: card.modelData.title
+                                        textFormat: Text.PlainText
                                         color: win.ink
                                         font.pixelSize: 15
                                         font.bold: true
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                        Accessible.name: text
+                                        Accessible.description: card.modelData.account
+                                        ToolTip.visible: accountHover.containsMouse && !!card.modelData.account
+                                        ToolTip.text: card.modelData.account
+                                        MouseArea {
+                                            id: accountHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.NoButton
+                                        }
                                     }
-                                    Item { Layout.fillWidth: true }
+                                    Label {
+                                        visible: !!card.modelData.account
+                                        text: qsTr("Codex")
+                                        color: win.muted
+                                        font.pixelSize: 12
+                                    }
                                     Label {
                                         visible: card.problem.length > 0 && card.rows.length > 0 && !card.info
                                         text: qsTr("Last known values")
@@ -585,7 +657,7 @@ ApplicationWindow {
                                             id: tile
                                             required property var modelData
                                             readonly property var estimate: win.pace(modelData)
-                                            readonly property color fill: modelData.left <= 10 ? win.bad : win.providerColor(card.modelData)
+                                            readonly property color fill: modelData.left <= 10 ? win.bad : win.providerColor(card.provider)
                                             Layout.fillWidth: true
                                             Layout.preferredWidth: 1
                                             Layout.alignment: Qt.AlignTop
@@ -608,7 +680,6 @@ ApplicationWindow {
                                                     font.pixelSize: 24
                                                     font.bold: true
                                                     font.letterSpacing: -0.4
-                                                    font.features: { "tnum": 1 }
                                                     Layout.alignment: Qt.AlignBaseline
                                                 }
                                                 Label {
@@ -656,7 +727,6 @@ ApplicationWindow {
                                                     text: tile.modelData.resets.length > 0 ? win.formatCountdown(tile.modelData.resets) : qsTr("%1 used").arg(win.formatPercent(tile.modelData.used))
                                                     color: win.muted
                                                     font.pixelSize: 12
-                                                    font.features: { "tnum": 1 }
                                                 }
                                                 Label {
                                                     visible: tile.modelData.resets.length > 0
@@ -810,7 +880,6 @@ ApplicationWindow {
                                         font.pixelSize: 34
                                         font.bold: true
                                         font.letterSpacing: -0.8
-                                        font.features: { "tnum": 1 }
                                     }
                                     Label {
                                         text: backend.metric === "tokens" ? win.capitalize(win.rangeText(backend.windowDays))
@@ -850,7 +919,6 @@ ApplicationWindow {
                                             color: win.ink
                                             font.pixelSize: 18
                                             font.bold: true
-                                            font.features: { "tnum": 1 }
                                             elide: Text.ElideRight
                                             Layout.fillWidth: true
                                         }
@@ -902,7 +970,6 @@ ApplicationWindow {
                                             text: win.formatAxis(chart.scale * modelData, chart.scale / 2)
                                             color: win.faint
                                             font.pixelSize: 11
-                                            font.features: { "tnum": 1 }
                                         }
                                     }
                                 }
@@ -941,8 +1008,7 @@ ApplicationWindow {
                                                     width: chart.barWidth
                                                     height: chart.scale > 0 ? chart.plotHeight * modelData.value / chart.scale : 0
                                                     color: win.providerColor(modelData.provider)
-                                                    topLeftRadius: index === 0 ? Math.min(3, theme.radius, width / 2) : 0
-                                                    topRightRadius: topLeftRadius
+                                                    radius: index === 0 ? Math.min(3, theme.radius, width / 2) : 0
                                                 }
                                             }
                                         }
@@ -997,7 +1063,6 @@ ApplicationWindow {
                                             color: win.ink
                                             font.pixelSize: 15
                                             font.bold: true
-                                            font.features: { "tnum": 1 }
                                         }
                                         Repeater {
                                             model: tip.entry ? tip.entry.parts : []
@@ -1021,7 +1086,6 @@ ApplicationWindow {
                                                     text: win.formatMetric(modelData.value)
                                                     color: win.ink
                                                     font.pixelSize: 12
-                                                    font.features: { "tnum": 1 }
                                                 }
                                             }
                                         }
@@ -1100,14 +1164,12 @@ ApplicationWindow {
                                                     color: win.ink
                                                     font.pixelSize: 15
                                                     font.bold: true
-                                                    font.features: { "tnum": 1 }
                                                     Layout.alignment: Qt.AlignBaseline
                                                 }
                                                 Label {
                                                     text: win.formatPercent(modelData.share * 100)
                                                     color: win.faint
                                                     font.pixelSize: 12
-                                                    font.features: { "tnum": 1 }
                                                     Layout.alignment: Qt.AlignBaseline
                                                 }
                                             }
@@ -1218,7 +1280,6 @@ ApplicationWindow {
                                                 text: win.formatTokens(modelData.tokens)
                                                 color: backend.metric === "tokens" ? win.ink : win.muted
                                                 font.pixelSize: 13
-                                                font.features: { "tnum": 1 }
                                                 horizontalAlignment: Text.AlignRight
                                                 Layout.preferredWidth: 80
                                             }
@@ -1226,7 +1287,6 @@ ApplicationWindow {
                                                 text: win.formatUsd(modelData.cost)
                                                 color: backend.metric === "cost" ? win.ink : win.muted
                                                 font.pixelSize: 13
-                                                font.features: { "tnum": 1 }
                                                 horizontalAlignment: Text.AlignRight
                                                 Layout.preferredWidth: 96
                                             }

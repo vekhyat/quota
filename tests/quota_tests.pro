@@ -1,4 +1,4 @@
-QT += core gui quick quickcontrols2 testlib dbus
+QT += core gui quick quickcontrols2 testlib
 CONFIG += c++17 testcase
 TARGET = quota_tests
 TEMPLATE = app
@@ -8,3 +8,5 @@ INCLUDEPATH += ../src
 HEADERS += ../src/usage.h ../src/history.h ../src/theme.h ../src/translator.h
 SOURCES += quota_tests.cpp ../src/usage.cpp ../src/history.cpp ../src/theme.cpp ../src/translator.cpp
 RESOURCES += ../src/resources.qrc
+
+!versionAtLeast(QT_VERSION, 6.4.0): error("Quota requires Qt 6.4 or newer")
