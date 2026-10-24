@@ -6,7 +6,13 @@ Quota shows limits, usage, and cost. It reads the same local history as the T3 C
 
 ## Install
 
-Download the package from the latest release, then install it:
+From the AUR:
+
+```sh
+yay -S quota
+```
+
+Or download the package from the latest release, then install it:
 
 ```sh
 sudo pacman -U quota-*.pkg.tar.zst
