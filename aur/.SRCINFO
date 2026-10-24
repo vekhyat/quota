@@ -1,6 +1,6 @@
 pkgbase = quota
 	pkgdesc = Show Claude, Codex, and Grok limits, usage, and cost
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/vekhyat/quota
 	arch = x86_64
@@ -12,7 +12,7 @@ pkgbase = quota
 	depends = gcc-libs
 	depends = glibc
 	conflicts = quota-tools
-	source = quota-0.1.0.tar.gz::https://github.com/vekhyat/quota/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = cc808a99f1439a99a7233064b6615f735f31002ec5665e8e5bf0e08cd6bd308b
+	source = quota-0.2.0.tar.gz::https://github.com/vekhyat/quota/archive/refs/tags/v0.2.0.tar.gz
+	sha256sums = 37fee371f1ebe084c95e24fbf65596474fc357d0b4f928bb0bce9eee34a39dae
 
 pkgname = quota

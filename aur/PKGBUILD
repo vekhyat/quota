@@ -10,7 +10,7 @@ depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'gcc-libs' 'glibc')
 # Both packages install /usr/bin/quota.
 conflicts=('quota-tools')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('cc808a99f1439a99a7233064b6615f735f31002ec5665e8e5bf0e08cd6bd308b')
+sha256sums=('37fee371f1ebe084c95e24fbf65596474fc357d0b4f928bb0bce9eee34a39dae')
 
 build() {
   cd "$pkgname-$pkgver"
