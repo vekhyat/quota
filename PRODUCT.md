@@ -29,7 +29,7 @@ Inferred. A single meter for the logins already on this computer. It does not in
 - Cost is an API estimate, not the subscription bill.
 - Follow the Omarchy accent and window radius.
 - English only. No Danish catalog.
-- Usage comes from the T3 scan cache when that cache is present. If the cache is absent, the app reads local Claude and Codex transcripts.
+- Usage comes from local Claude Code, Codex, Pi, and Grok transcripts, across every config on the computer. A T3 Code scan cache updated in the last day adds the providers Quota does not read.
 - Prices come from a downloaded LiteLLM price file. A built-in copy is the offline fallback.
 
 ## Assumptions

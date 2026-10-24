@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QSaveFile>
 
 #include <cmath>
@@ -18,13 +19,13 @@ constexpr qint64 kRetentionMs = 90LL * 24 * 60 * 60 * 1000;
 constexpr qint64 kRateTtlMs = 24LL * 60 * 60 * 1000;
 constexpr qint64 kForkGapMs = 1000;
 constexpr int kGuardLength = 64;
-// shortcut: a longer line is skipped, raise this if a transcript exceeds it.
+// A usage line is small. A longer line is message content, so it is skipped unread.
 constexpr int kMaxLine = 8 * 1024 * 1024;
 constexpr int kCacheVersion = 1;
 
 // These markers are the only lines that carry a count, a model, or a session id.
 const char *kMarkers[] = {"\"usage\"", "\"token_count\"", "\"turn_context\"", "\"session_meta\"",
-                          "\"thread_settings_applied\""};
+                          "\"thread_settings_applied\"", "\"turn_completed\""};
 
 quint32 fnv1a(const QByteArray &data)
 {
@@ -200,6 +201,96 @@ std::optional<UsageRec> parseClaudeLine(const QByteArray &line)
         rec.dedupeKey = (messageId.isString() ? messageId.toString() : QString()) + ':'
             + (requestId.isString() ? requestId.toString() : QString());
     return rec;
+}
+
+std::optional<UsageRec> parsePiLine(const QByteArray &line)
+{
+    const QJsonObject record = QJsonDocument::fromJson(line).object();
+    if (record.value("type").toString() != "message")
+        return std::nullopt;
+    const QJsonObject message = record.value("message").toObject();
+    if (message.value("role").toString() != "assistant" || !message.value("usage").isObject())
+        return std::nullopt;
+    const QJsonObject usage = message.value("usage").toObject();
+    qint64 stamp = timestampMs(record.value("timestamp"));
+    if (stamp < 0)
+        stamp = timestampMs(message.value("timestamp"));
+    QString model = message.value("model").toString();
+    if (stamp < 0 || model.isEmpty())
+        return std::nullopt;
+    // T3 Code names a Pi model by its provider too, so both apps show the same rows.
+    const QString provider = message.value("provider").toString();
+    if (!provider.isEmpty() && !model.contains('/'))
+        model = provider + '/' + model;
+    UsageRec rec;
+    rec.timestampMs = stamp;
+    rec.provider = "pi";
+    rec.model = model;
+    // Pi reports input without the cached part, unlike Codex.
+    rec.uncached = tokenOrZero(usage.value("input"));
+    rec.cached = tokenOrZero(usage.value("cacheRead"));
+    rec.cacheWrite = tokenOrZero(usage.value("cacheWrite"));
+    rec.output = tokenOrZero(usage.value("output"));
+    if (rec.uncached + rec.cached + rec.cacheWrite + rec.output == 0)
+        return std::nullopt;
+    const QJsonValue cost = usage.value("cost").toObject().value("total");
+    if (cost.isDouble() && std::isfinite(cost.toDouble()))
+        rec.reportedCost = cost.toDouble();
+    rec.dedupeKey = "pi:" + record.value("id").toString() + ':' + QString::number(stamp);
+    return rec;
+}
+
+// Grok writes one turn_completed update per prompt, with usage split by model.
+QVector<UsageRec> parseGrokLine(const QByteArray &line, const QString &sessionId)
+{
+    const QJsonObject record = QJsonDocument::fromJson(line).object();
+    const QJsonObject params = record.value("params").toObject();
+    const QJsonObject update = params.value("update").toObject();
+    if (update.value("sessionUpdate").toString() != "turn_completed" || !update.value("usage").isObject())
+        return {};
+    const QJsonObject meta = params.value("_meta").toObject();
+    qint64 stamp = timestampMs(meta.value("agentTimestampMs"));
+    if (stamp < 0) {
+        stamp = timestampMs(record.value("timestamp"));
+        // The line timestamp is in seconds.
+        if (stamp >= 0 && stamp < 100'000'000'000LL)
+            stamp *= 1000;
+    }
+    if (stamp < 0)
+        return {};
+    const QString event = meta.value("eventId").isString() ? meta.value("eventId").toString() : QString::number(stamp);
+    const QJsonObject usage = update.value("usage").toObject();
+    QVector<QPair<QString, QJsonObject>> parts;
+    const QJsonObject byModel = usage.value("modelUsage").toObject();
+    for (auto it = byModel.begin(); it != byModel.end(); ++it) {
+        if (it.value().isObject())
+            parts.append({it.key(), it.value().toObject()});
+    }
+    if (parts.isEmpty())
+        parts.append({update.value("_meta").toObject().value("modelId").toString(), usage});
+    QVector<UsageRec> records;
+    for (const auto &[model, counts] : parts) {
+        if (model.isEmpty())
+            continue;
+        UsageRec rec;
+        rec.timestampMs = stamp;
+        rec.provider = "grok";
+        rec.model = model;
+        rec.cached = tokenOrZero(counts.value("cachedReadTokens"));
+        rec.cacheWrite = tokenOrZero(counts.value("cacheCreationTokens"));
+        // Grok input includes the cached parts.
+        rec.uncached = std::max(0.0, tokenOrZero(counts.value("inputTokens")) - rec.cached - rec.cacheWrite);
+        rec.output = tokenOrZero(counts.value("outputTokens"));
+        if (rec.uncached + rec.cached + rec.cacheWrite + rec.output == 0)
+            continue;
+        // One tick is a ten-billionth of a dollar.
+        const QJsonValue ticks = counts.value("costUsdTicks");
+        if (ticks.isDouble() && std::isfinite(ticks.toDouble()))
+            rec.reportedCost = ticks.toDouble() / 1e10;
+        rec.dedupeKey = sessionId + ':' + event + ':' + model;
+        records.append(rec);
+    }
+    return records;
 }
 
 std::optional<UsageRec> parseCodexLine(const QByteArray &line, CodexCarry &state)
@@ -565,6 +656,11 @@ FileRead readTranscript(const QString &path, const QString &provider, const Cach
             if (provider == "claude") {
                 if (const std::optional<UsageRec> rec = parseClaudeLine(line))
                     result.records.append(*rec);
+            } else if (provider == "pi") {
+                if (const std::optional<UsageRec> rec = parsePiLine(line))
+                    result.records.append(*rec);
+            } else if (provider == "grok") {
+                result.records += parseGrokLine(line, info.dir().dirName());
             } else if (const std::optional<UsageRec> rec = parseCodexLine(line, result.carry)) {
                 result.records.append(*rec);
             }
@@ -673,7 +769,100 @@ QJsonObject rateDocument(const QJsonObject &root)
 }
 }
 
+namespace {
+QString expandHome(const QString &path, const QString &home)
+{
+    if (path == "~")
+        return home;
+    if (path.startsWith("~/"))
+        return home + path.mid(1);
+    return path;
+}
+
+// Accepts a tool home or the transcript folder inside it.
+QString transcriptFolder(const QString &path, const QStringList &inner)
+{
+    for (const QString &sub : inner) {
+        const QFileInfo nested(QDir(path).filePath(sub));
+        if (nested.isDir())
+            return nested.canonicalFilePath();
+    }
+    const QFileInfo direct(path);
+    return direct.isDir() ? direct.canonicalFilePath() : QString();
+}
+
+void addFolder(QStringList *list, const QString &folder)
+{
+    if (!folder.isEmpty() && !list->contains(folder))
+        list->append(folder);
+}
+}
+
+HistorySources discoverSources(const QString &home, const QString &claudeDir, const QString &codexHome,
+                               const QString &grokHome, const QString &sourcesFile)
+{
+    HistorySources sources;
+    const QStringList claudeInner{"projects"};
+    const QStringList sessionsInner{"sessions"};
+    const QStringList piInner{"sessions", "agent/sessions"};
+    // A tool home is only a match when it holds transcripts, so a sibling such as
+    // ~/.claude-backup without a projects folder is ignored.
+    const auto siblings = [&](const QString &prefix, const QString &inner, QStringList *list) {
+        const QStringList names = QDir(home).entryList({prefix + "*"}, QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot);
+        for (const QString &name : names) {
+            const QFileInfo nested(QDir(QDir(home).filePath(name)).filePath(inner));
+            if (nested.isDir())
+                addFolder(list, nested.canonicalFilePath());
+        }
+    };
+    addFolder(&sources.claude, transcriptFolder(QDir(claudeDir).filePath("projects"), {}));
+    siblings(".claude", "projects", &sources.claude);
+    addFolder(&sources.codex, transcriptFolder(QDir(codexHome).filePath("sessions"), {}));
+    siblings(".codex", "sessions", &sources.codex);
+    addFolder(&sources.pi, transcriptFolder(QDir(home).filePath(".pi/agent/sessions"), {}));
+    addFolder(&sources.grok, transcriptFolder(QDir(grokHome).filePath("sessions"), {}));
+
+    QFile file(sourcesFile);
+    if (file.open(QIODevice::ReadOnly)) {
+        const QStringList lines = QString::fromUtf8(file.readAll()).split('\n');
+        for (const QString &raw : lines) {
+            const QString line = raw.trimmed();
+            if (line.isEmpty() || line.startsWith('#'))
+                continue;
+            const int space = line.indexOf(QRegularExpression("\\s"));
+            if (space < 0)
+                continue;
+            const QString provider = line.left(space).toLower();
+            const QString path = expandHome(line.mid(space).trimmed(), home);
+            if (provider == "claude")
+                addFolder(&sources.claude, transcriptFolder(path, claudeInner));
+            else if (provider == "codex")
+                addFolder(&sources.codex, transcriptFolder(path, sessionsInner));
+            else if (provider == "pi")
+                addFolder(&sources.pi, transcriptFolder(path, piInner));
+            else if (provider == "grok")
+                addFolder(&sources.grok, transcriptFolder(path, sessionsInner));
+        }
+    }
+    return sources;
+}
+
 HistoryScan scanHistory(const QString &claudeDir, const QString &codexHome, const QString &cacheDir, qint64 nowMs)
+{
+    HistorySources sources;
+    addFolder(&sources.claude, transcriptFolder(QDir(claudeDir).filePath("projects"), {}));
+    addFolder(&sources.codex, transcriptFolder(QDir(codexHome).filePath("sessions"), {}));
+    HistoryScan scan = scanHistory(sources, cacheDir, nowMs);
+    if (scan.directories.isEmpty()) {
+        if (QFileInfo(claudeDir).isDir())
+            scan.directories.append(QFileInfo(claudeDir).absoluteFilePath());
+        if (QFileInfo(codexHome).isDir())
+            scan.directories.append(QFileInfo(codexHome).absoluteFilePath());
+    }
+    return scan;
+}
+
+HistoryScan scanHistory(const HistorySources &sources, const QString &cacheDir, qint64 nowMs)
 {
     HistoryScan scan;
     if (nowMs <= 0)
@@ -691,7 +880,9 @@ HistoryScan scanHistory(const QString &claudeDir, const QString &codexHome, cons
     const auto take = [&](const QString &root, const QString &provider) {
         if (!QDir(root).exists())
             return;
-        QDirIterator it(root, {"*.jsonl"}, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+        // Grok keeps usage only in updates.jsonl. Its other logs hold chat text.
+        const QStringList pattern = provider == "grok" ? QStringList{"updates.jsonl"} : QStringList{"*.jsonl"};
+        QDirIterator it(root, pattern, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
         while (it.hasNext()) {
             it.next();
             const QFileInfo info = it.fileInfo();
@@ -720,8 +911,14 @@ HistoryScan scanHistory(const QString &claudeDir, const QString &codexHome, cons
             held.append({read.sessionId, provider, read.records});
         }
     };
-    take(QDir(claudeDir).filePath("projects"), "claude");
-    take(QDir(codexHome).filePath("sessions"), "codex");
+    for (const QString &root : sources.claude)
+        take(root, "claude");
+    for (const QString &root : sources.codex)
+        take(root, "codex");
+    for (const QString &root : sources.pi)
+        take(root, "pi");
+    for (const QString &root : sources.grok)
+        take(root, "grok");
     writeScanCache(cachePath, next);
 
     QHash<QString, int> sessionFiles;
@@ -742,14 +939,11 @@ HistoryScan scanHistory(const QString &claudeDir, const QString &codexHome, cons
                 scan.records.append(rec);
         }
     }
-    collectDirs(QDir(claudeDir).filePath("projects"), &scan.directories);
-    collectDirs(QDir(codexHome).filePath("sessions"), &scan.directories);
-    if (scan.directories.isEmpty()) {
-        if (QFileInfo(claudeDir).isDir())
-            scan.directories.append(QFileInfo(claudeDir).absoluteFilePath());
-        if (QFileInfo(codexHome).isDir())
-            scan.directories.append(QFileInfo(codexHome).absoluteFilePath());
+    for (const QStringList *roots : {&sources.claude, &sources.codex, &sources.pi, &sources.grok}) {
+        for (const QString &root : *roots)
+            collectDirs(root, &scan.directories);
     }
+    scan.directories.removeDuplicates();
     return scan;
 }
 

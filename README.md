@@ -9,7 +9,7 @@ Quota shows limits, usage, and cost. It reads the same local history as the T3 C
 Install the package from the latest release:
 
 ```sh
-sudo pacman -U https://github.com/vekhyat/quota/releases/download/v0.1.0/quota-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/vekhyat/quota/releases/download/v0.2.0/quota-0.2.0-1-x86_64.pkg.tar.zst
 ```
 
 It conflicts with `quota-tools`, since both install `/usr/bin/quota`.
@@ -37,9 +37,15 @@ Press Super + Space, then type Quota.
 
 ## Data
 
-Usage and cost use the T3 Code scan cache when that file is present. If it is absent, Quota reads Claude and Codex transcripts on this computer. Prices come from the LiteLLM price list, with a built-in copy for offline use. Limits use the Claude, Codex, and Grok logins on this computer. The cost is an API estimate. It is not the subscription bill.
+Usage and cost come from the Claude Code, Codex, Pi, and Grok history on this computer. T3 Code is not needed. If T3 Code is installed, its scan cache adds providers Quota does not read, such as Cursor or OpenCode. Prices come from the LiteLLM price list, with a built-in copy for offline use.
 
-The T3 Code clone is at `~/Work/t3code`.
+Quota finds every config: `~/.claude`, `~/.codex`, and siblings such as `~/.claude-work` or `~/.codex2`, plus `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. List any other config in `~/.config/quota/sources`, one per line:
+
+```
+claude ~/work/claude-config
+codex /mnt/data/codex
+``` Limits use the Claude, Codex, and Grok logins on this computer. The cost is an API estimate. It is not the subscription bill.
+
 
 ## Limits
 

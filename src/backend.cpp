@@ -17,6 +17,13 @@
 
 namespace {
 const QStringList kProviderOrder{"claude", "codex", "grok", "cursor", "opencode", "antigravity", "pi", "muse"};
+// Quota reads these itself. The T3 cache supplies every other provider.
+const QStringList kLocalProviders{"claude", "codex", "pi", "grok"};
+// T3 Code rewrites its cache while it runs. An older cache means T3 Code is closed or
+// gone, and local history is the fresher source.
+constexpr qint64 kT3FreshMs = 24LL * 60 * 60 * 1000;
+// Folder watches miss a transcript that grows, so local history is also read on a timer.
+constexpr int kHistoryPollMs = 60 * 1000;
 // Used when the installed Claude Code does not answer --version.
 const QString kFallbackClaudeVersion = QStringLiteral("2.1.310");
 
@@ -49,6 +56,8 @@ Backend::Backend(bool preview, QObject *parent) : QObject(parent), m_preview(pre
     m_claudeDir = firstEnv("QUOTA_CLAUDE_DIR", "CLAUDE_CONFIG_DIR", QDir::homePath() + "/.claude");
     m_codexHome = firstEnv("QUOTA_CODEX_HOME", "CODEX_HOME", QDir::homePath() + "/.codex");
     m_cacheDir = homePath("QUOTA_CACHE_DIR", QDir::homePath() + "/.cache/quota");
+    m_sourcesFile = homePath("QUOTA_SOURCES_FILE",
+                             QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + "/quota/sources");
     m_grokHome = homePath("QUOTA_GROK_HOME", QDir::homePath() + "/.grok");
     m_claudeVersion = qEnvironmentVariable("QUOTA_CLAUDE_VERSION");
     m_claudeBin = homePath("QUOTA_CLAUDE_BIN", QStandardPaths::findExecutable("claude"));
@@ -72,6 +81,8 @@ Backend::Backend(bool preview, QObject *parent) : QObject(parent), m_preview(pre
             loadUsage();
     });
     connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_historyDebounce.start(); });
+    m_historyPoll.setInterval(kHistoryPollMs);
+    connect(&m_historyPoll, &QTimer::timeout, this, &Backend::startLocalScan);
     m_limitTimer.setInterval(5 * 60 * 1000);
     connect(&m_limitTimer, &QTimer::timeout, this, &Backend::refresh);
     if (!m_preview)
@@ -154,36 +165,30 @@ void Backend::loadUsage()
     const QString cachePath = m_t3Home + "/userdata/usage-scan-cache-v9.json";
     QVector<UsageRec> t3Records;
     qint64 modified = 0;
-    // The T3 cache wins so the numbers stay the same as the T3 panel.
-    if (readT3UsageCache(cachePath, &t3Records, &modified)) {
-        m_scanGeneration += 1;
-        m_scanRunning = false;
-        m_rescan = false;
-        m_usageSource = "t3";
-        m_records = t3Records;
-        m_cacheAt = modified;
-        note("no-cache", m_records.isEmpty());
-        if (!m_watcher.files().contains(cachePath))
-            m_watcher.addPath(cachePath);
-        const QStringList watched = m_watcher.directories();
-        for (const QString &path : watched)
-            m_watcher.removePath(path);
-        loadRates(true);
-        return;
+    // Local history gives the same numbers as T3 Code for the providers Quota reads, and
+    // it is current while a session is still writing. The T3 cache adds only the
+    // providers Quota cannot read, and only while T3 Code keeps it fresh.
+    const bool t3 = readT3UsageCache(cachePath, &t3Records, &modified)
+        && QDateTime::currentMSecsSinceEpoch() - modified < kT3FreshMs;
+    m_t3Extra.clear();
+    if (t3) {
+        for (const UsageRec &rec : t3Records) {
+            if (!kLocalProviders.contains(rec.provider))
+                m_t3Extra.append(rec);
+        }
     }
-    if (m_usageSource != "local") {
-        m_records.clear();
-        m_cacheAt = 0;
-    }
-    m_usageSource = "local";
-    note("no-cache", false);
-    loadRates(false);
+    // Watch the cache even while it is stale, so its rows return when T3 Code runs again.
+    if (QFileInfo::exists(cachePath) && !m_watcher.files().contains(cachePath))
+        m_watcher.addPath(cachePath);
+    loadRates(t3);
+    if (!m_preview)
+        m_historyPoll.start();
     startLocalScan();
 }
 
 void Backend::startLocalScan()
 {
-    if (m_preview || m_usageSource != "local")
+    if (m_preview)
         return;
     if (m_scanRunning) {
         m_rescan = true;
@@ -193,15 +198,18 @@ void Backend::startLocalScan()
     const int generation = ++m_scanGeneration;
     const QString claudeDir = m_claudeDir;
     const QString codexHome = m_codexHome;
+    const QString grokHome = m_grokHome;
+    const QString sourcesFile = m_sourcesFile;
     const QString cacheDir = m_cacheDir;
     auto *watcher = new QFutureWatcher<HistoryScan>(this);
     connect(watcher, &QFutureWatcher<HistoryScan>::finished, this, [this, watcher, generation] {
         const HistoryScan scan = watcher->result();
         watcher->deleteLater();
-        if (generation != m_scanGeneration || m_usageSource != "local")
+        if (generation != m_scanGeneration)
             return;
         m_scanRunning = false;
-        m_records = scan.records;
+        m_records = scan.records + m_t3Extra;
+        m_usageSource = m_t3Extra.isEmpty() ? "local" : "local+t3";
         m_cacheAt = QDateTime::currentMSecsSinceEpoch();
         note("no-cache", m_records.isEmpty());
         armHistoryWatch(scan.directories);
@@ -213,8 +221,9 @@ void Backend::startLocalScan()
             m_historyDebounce.start();
         }
     });
-    watcher->setFuture(QtConcurrent::run([claudeDir, codexHome, cacheDir] {
-        return scanHistory(claudeDir, codexHome, cacheDir, 0);
+    watcher->setFuture(QtConcurrent::run([claudeDir, codexHome, grokHome, sourcesFile, cacheDir] {
+        const HistorySources sources = discoverSources(QDir::homePath(), claudeDir, codexHome, grokHome, sourcesFile);
+        return scanHistory(sources, cacheDir, 0);
     }));
 }
 
@@ -668,7 +677,7 @@ void Backend::readCodexAppServer(int generation)
     connect(m_codex, &QProcess::started, this, [this] {
         const QByteArray hello =
             "{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"quota\",\"title\":\"Quota\","
-            "\"version\":\"0.1.0\"},\"capabilities\":{\"experimentalApi\":true}}}\n";
+            "\"version\":\"0.2.0\"},\"capabilities\":{\"experimentalApi\":true}}}\n";
         m_codex->write(hello);
     });
 }

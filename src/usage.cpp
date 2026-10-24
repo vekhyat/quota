@@ -147,6 +147,12 @@ QVector<UsageRec> parseUsageCache(const QJsonObject &root)
         const int i = index.toInt();
         return i >= 0 && i < table.size() ? table.at(i).toString() : QString();
     };
+    const QJsonArray sessions = root.value("sessions").toArray();
+    struct FileRows {
+        QVector<UsageRec> records;
+        QStringList sessionIds;
+    };
+    QVector<FileRows> perFile;
     for (auto it = files.begin(); it != files.end(); ++it) {
         if (!it.value().isObject())
             continue;
@@ -154,8 +160,9 @@ QVector<UsageRec> parseUsageCache(const QJsonObject &root)
         const QString provider = file.value("p").toString();
         if (provider.isEmpty())
             continue;
-        const auto take = [&](const QJsonArray &rows) {
-            for (const QJsonValue &raw : rows) {
+        FileRows rows;
+        const auto take = [&](const QJsonArray &table) {
+            for (const QJsonValue &raw : table) {
                 const QJsonArray row = raw.toArray();
                 if (row.size() < 8)
                     continue;
@@ -172,12 +179,49 @@ QVector<UsageRec> parseUsageCache(const QJsonObject &root)
                 rec.speed = row.size() > 10 && row.at(10).isDouble() ? row.at(10).toInt() : 0;
                 if (row.size() > 11 && row.at(11).isDouble())
                     rec.rateModel = at(models, row.at(11));
-                if (!rec.model.isEmpty())
-                    records.append(rec);
+                // T3 Code drops these local placeholders when it reads the cache.
+                if (provider == "claude" && rec.model == "<synthetic>")
+                    continue;
+                if (!rec.model.isEmpty()) {
+                    rows.records.append(rec);
+                    rows.sessionIds.append(at(sessions, row.at(2)));
+                }
             }
         };
         take(file.value("r").toArray());
         take(file.value("t").toArray());
+        perFile.append(rows);
+    }
+
+    // T3 Code dedupes Codex sessions that span files when it sums, not in the cache.
+    // A resumed or forked session copies earlier requests into the new file.
+    QHash<QString, int> firstFile;
+    QSet<QString> shared;
+    for (int index = 0; index < perFile.size(); ++index) {
+        for (int i = 0; i < perFile[index].records.size(); ++i) {
+            const QString &session = perFile[index].sessionIds[i];
+            if (perFile[index].records[i].provider != "codex" || session.isEmpty())
+                continue;
+            const auto found = firstFile.constFind(session);
+            if (found == firstFile.cend())
+                firstFile.insert(session, index);
+            else if (found.value() != index)
+                shared.insert(session);
+        }
+    }
+    for (FileRows &file : perFile) {
+        QHash<QString, int> occurrences;
+        for (int i = 0; i < file.records.size(); ++i) {
+            UsageRec rec = file.records[i];
+            const QString &session = file.sessionIds[i];
+            if (rec.provider == "codex" && shared.contains(session)) {
+                const QString key = session + '\n' + QString::number(rec.timestampMs) + '\n' + rec.model + '\n'
+                    + QString::number(rec.uncached, 'f', 0) + '\n' + QString::number(rec.cached, 'f', 0) + '\n'
+                    + QString::number(rec.cacheWrite, 'f', 0) + '\n' + QString::number(rec.output, 'f', 0);
+                rec.dedupeKey = key + '\n' + QString::number(++occurrences[key]);
+            }
+            records.append(rec);
+        }
     }
     return records;
 }

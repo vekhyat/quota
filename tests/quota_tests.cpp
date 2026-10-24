@@ -383,6 +383,92 @@ private slots:
         QCOMPARE(summary.total.tokens, 110.0);
     }
 
+    void piReadsAssistantUsageAndReportedCost()
+    {
+        QTemporaryDir dir;
+        const QJsonObject usage{{"input", 225}, {"cacheRead", 15104}, {"cacheWrite", 0}, {"output", 24},
+                                {"cost", QJsonObject{{"total", 0.012}}}};
+        const QByteArray reply = QJsonDocument(QJsonObject{{"type", "message"}, {"id", "6b2e8a3f"}, {"timestamp", "2026-08-01T09:14:06.978Z"},
+            {"message", QJsonObject{{"role", "assistant"}, {"provider", "openai-codex"}, {"model", "gpt-5"}, {"usage", usage}}}}).toJson(QJsonDocument::Compact);
+        const QByteArray prompt = QJsonDocument(QJsonObject{{"type", "message"}, {"id", "1"}, {"timestamp", "2026-08-01T09:14:00Z"},
+            {"message", QJsonObject{{"role", "user"}, {"usage", QJsonObject{{"input", 9}}}}}}).toJson(QJsonDocument::Compact);
+        QVERIFY(writeFile(dir.path() + "/home/.pi/agent/sessions/demo/session.jsonl", prompt + "\n" + reply + "\n"));
+        const HistorySources sources = discoverSources(dir.path() + "/home", dir.path() + "/none", dir.path() + "/none",
+                                                       dir.path() + "/none", dir.path() + "/none");
+        QCOMPARE(sources.pi.size(), 1);
+        const HistoryScan scan = scanHistory(sources, dir.path() + "/cache");
+        QCOMPARE(scan.records.size(), 1);
+        const UsageRec &rec = scan.records.at(0);
+        QCOMPARE(rec.provider, QString("pi"));
+        QCOMPARE(rec.model, QString("openai-codex/gpt-5"));
+        QCOMPARE(rec.uncached, 225.0);
+        QCOMPARE(rec.cached, 15104.0);
+        QCOMPARE(rec.output, 24.0);
+        QCOMPARE(rec.reportedCost, 0.012);
+    }
+
+    void grokReadsOneRecordPerPromptAndModel()
+    {
+        QTemporaryDir dir;
+        const auto completed = [](const char *event, double input, double cached, double output, double ticks) {
+            const QJsonObject counts{{"inputTokens", input}, {"cachedReadTokens", cached}, {"cacheCreationTokens", 0},
+                                     {"outputTokens", output}, {"costUsdTicks", ticks}};
+            return QJsonDocument(QJsonObject{{"method", "_x.ai/session/update"}, {"timestamp", 1785575646},
+                {"params", QJsonObject{{"_meta", QJsonObject{{"agentTimestampMs", 1785575646500.0}, {"eventId", event}}},
+                    {"update", QJsonObject{{"sessionUpdate", "turn_completed"},
+                        {"usage", QJsonObject{{"modelUsage", QJsonObject{{"grok-4.7-build", counts}}}}}}}}}}).toJson(QJsonDocument::Compact);
+        };
+        const QString session = dir.path() + "/grok/sessions/%2Fhome/01a16934";
+        QVERIFY(writeFile(session + "/updates.jsonl", completed("e1", 4428836, 4275712, 33551, 8994394000) + "\n"
+                                                         + completed("e2", 20602, 0, 375, 100000000) + "\n"));
+        QVERIFY(writeFile(session + "/events.jsonl", completed("e9", 1, 0, 1, 1) + "\n"));
+        HistorySources sources;
+        sources.grok = {dir.path() + "/grok/sessions"};
+        const HistoryScan scan = scanHistory(sources, dir.path() + "/cache");
+        QCOMPARE(scan.records.size(), 2);
+        QCOMPARE(scan.records.at(0).uncached, 153124.0);
+        QCOMPARE(scan.records.at(0).cached, 4275712.0);
+        QCOMPARE(scan.records.at(0).reportedCost, 0.8994394);
+        QCOMPARE(scan.records.at(0).timestampMs, qint64(1785575646500));
+        QVERIFY(scan.records.at(0).dedupeKey != scan.records.at(1).dedupeKey);
+    }
+
+    void sourcesFindSiblingHomesAndTheSourcesFile()
+    {
+        QTemporaryDir dir;
+        const QString home = dir.path() + "/home";
+        QVERIFY(QDir().mkpath(home + "/.claude/projects"));
+        QVERIFY(QDir().mkpath(home + "/.claude-work/projects"));
+        QVERIFY(QDir().mkpath(home + "/.claude-backup"));
+        QVERIFY(QDir().mkpath(home + "/.codex/sessions"));
+        QVERIFY(QDir().mkpath(dir.path() + "/elsewhere/codex/sessions"));
+        // A shadow Codex home links its sessions back to the shared home.
+        QVERIFY(QDir().mkpath(home + "/.codex-shadow"));
+        QVERIFY(QFile::link(home + "/.codex/sessions", home + "/.codex-shadow/sessions"));
+        QVERIFY(writeFile(home + "/sources", "# extra homes\ncodex ~/../elsewhere/codex\nclaude ~/.claude-work\nbogus line\n"));
+        const HistorySources sources = discoverSources(home, home + "/.claude", home + "/.codex", home + "/.grok", home + "/sources");
+        QCOMPARE(sources.claude.size(), 2);
+        QCOMPARE(sources.codex.size(), 2);
+        QVERIFY(sources.codex.contains(QFileInfo(dir.path() + "/elsewhere/codex/sessions").canonicalFilePath()));
+        QVERIFY(sources.grok.isEmpty());
+    }
+
+    void t3CacheCountsASharedCodexSessionOnce()
+    {
+        // The same request appears in a session file and in the file that resumed it.
+        const QJsonArray row{1785575646000.0, 0, 0, 100, 0, 0, 10, 0, QJsonValue(), QJsonValue(), 0};
+        const QJsonArray other{1785575647000.0, 0, 0, 50, 0, 0, 5, 0, QJsonValue(), QJsonValue(), 0};
+        const QJsonObject root{{"version", 9}, {"models", QJsonArray{"gpt-5"}}, {"sessions", QJsonArray{"s1"}},
+            {"files", QJsonObject{{"/a.jsonl", QJsonObject{{"p", "codex"}, {"r", QJsonArray{row}}, {"t", QJsonArray{}}}},
+                                  {"/b.jsonl", QJsonObject{{"p", "codex"}, {"r", QJsonArray{row, other}}, {"t", QJsonArray{}}}}}}};
+        const QVector<UsageRec> records = parseUsageCache(root);
+        QCOMPARE(records.size(), 3);
+        const QTimeZone utc("UTC");
+        const UsageSummary summary = summarizeUsage(records, {}, makeUsageWindow(7, QDateTime(QDate(2026, 8, 1), QTime(12, 0), utc), utc), utc);
+        QCOMPARE(summary.total.records, 2);
+        QCOMPARE(summary.total.tokens, 165.0);
+    }
+
     void rateFallbackUsesDownloadThenCacheThenBundle()
     {
         QTemporaryDir dir;

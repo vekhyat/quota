@@ -21,8 +21,26 @@ struct HistoryScan {
     bool rescan = false;
 };
 
-// claudeDir is the Claude home. codexHome is the Codex home. cacheDir receives scan-cache.json.
-// nowMs is the clock for the 90 day file cutoff. Zero means the current time.
+// The transcript folders to scan, one list per provider. Claude lists projects folders,
+// the others list sessions folders.
+struct HistorySources {
+    QStringList claude;
+    QStringList codex;
+    QStringList pi;
+    QStringList grok;
+};
+
+// Finds every config on this computer: the given homes, sibling homes such as
+// ~/.claude-work or ~/.codex2, and the folders named in the sources file. Each line of
+// that file is a provider and a home, such as "claude ~/work/claude". Folders that
+// resolve to the same place are kept once.
+HistorySources discoverSources(const QString &home, const QString &claudeDir, const QString &codexHome,
+                               const QString &grokHome, const QString &sourcesFile);
+
+// cacheDir receives scan-cache.json. nowMs is the clock for the 90 day file cutoff.
+// Zero means the current time.
+HistoryScan scanHistory(const HistorySources &sources, const QString &cacheDir, qint64 nowMs = 0);
+// Scans one Claude home and one Codex home.
 HistoryScan scanHistory(const QString &claudeDir, const QString &codexHome, const QString &cacheDir, qint64 nowMs = 0);
 
 struct RateLoad {

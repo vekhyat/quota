@@ -331,8 +331,8 @@ ApplicationWindow {
 
     function sourceText(source) {
         unusedLanguage()
-        if (source === "t3")
-            return qsTr("From T3 Code")
+        if (source === "local+t3")
+            return qsTr("From local history and T3 Code")
         if (source === "local")
             return qsTr("From local history")
         return ""

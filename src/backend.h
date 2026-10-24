@@ -75,6 +75,7 @@ private:
     QString m_metric = "cost";
     int m_windowDays = 7;
     QVector<UsageRec> m_records;
+    QVector<UsageRec> m_t3Extra;
     QHash<QString, ModelRate> m_rates;
     QVector<LimitWindow> m_limitRows;
     QVariantList m_rows;
@@ -99,6 +100,7 @@ private:
     QString m_claudeDir;
     QString m_codexHome;
     QString m_cacheDir;
+    QString m_sourcesFile;
     QString m_usageSource;
     QString m_grokHome;
     QString m_codexBin;
@@ -111,5 +113,6 @@ private:
     QFileSystemWatcher m_watcher;
     QTimer m_cacheDebounce;
     QTimer m_historyDebounce;
+    QTimer m_historyPoll;
     QTimer m_limitTimer;
 };

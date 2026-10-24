@@ -1,6 +1,6 @@
 # Maintainer: Vekhyat Jain <vekhyatjain123 at gmail dot com>
 pkgname=quota
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Show Claude, Codex, and Grok limits, usage, and cost'
 arch=('x86_64' 'aarch64')
