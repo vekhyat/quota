@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Quota
+Comment=Show limits, usage, and cost
+Exec=quota
+Icon=quota
+Terminal=false
+Categories=Utility;
+StartupWMClass=quota
