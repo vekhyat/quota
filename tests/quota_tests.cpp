@@ -3,15 +3,60 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTimeZone>
 #include <QtTest>
 
+#include "history.h"
 #include "theme.h"
 #include "translator.h"
 #include "usage.h"
+
+namespace {
+QByteArray claudeLine(const char *id, int input, int output, const char *stamp = "2026-08-07T04:05:13.944Z")
+{
+    const QJsonObject line{{"type", "assistant"},
+                           {"timestamp", stamp},
+                           {"requestId", QString("req-") + id},
+                           {"message", QJsonObject{{"id", QString("msg-") + id},
+                                                     {"model", "claude-opus"},
+                                                     {"usage", QJsonObject{{"input_tokens", input}, {"output_tokens", output}}}}}};
+    return QJsonDocument(line).toJson(QJsonDocument::Compact);
+}
+
+QByteArray codexCount(int input, int cached, int write, int output, int cumInput, int cumCached, int cumWrite, int cumOutput,
+                      const char *stamp)
+{
+    const auto usage = [](int in, int cache, int created, int out) {
+        return QJsonObject{{"input_tokens", in},
+                           {"cached_input_tokens", cache},
+                           {"cache_write_input_tokens", created},
+                           {"output_tokens", out},
+                           {"reasoning_output_tokens", 0},
+                           {"total_tokens", in + out}};
+    };
+    const QJsonObject line{
+        {"type", "event_msg"},
+        {"timestamp", stamp},
+        {"payload", QJsonObject{{"type", "token_count"},
+                                 {"info", QJsonObject{{"last_token_usage", usage(input, cached, write, output)},
+                                                       {"total_token_usage", usage(cumInput, cumCached, cumWrite, cumOutput)}}}}},
+    };
+    return QJsonDocument(line).toJson(QJsonDocument::Compact);
+}
+
+bool writeFile(const QString &path, const QByteArray &bytes)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
+        return false;
+    return file.write(bytes) == bytes.size();
+}
+}
 
 class QuotaTests : public QObject {
     Q_OBJECT
@@ -209,6 +254,179 @@ private slots:
         Translator translator(dir.path() + "/language", dir.path());
         QCOMPARE(translator.language(), QString("en"));
         QVERIFY(translator.translate("Main", "Save").isNull());
+    }
+
+    void claudeDedupeKeepsTheFirstStreamCopy()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/claude/projects/demo/session.jsonl";
+        QVERIFY(writeFile(path, claudeLine("one", 10, 2) + "\n" + claudeLine("one", 99, 8) + "\n" + claudeLine("two", 4, 1) + "\n"));
+        const HistoryScan scan = scanHistory(dir.path() + "/claude", dir.path() + "/codex", dir.path() + "/cache");
+        QCOMPARE(scan.records.size(), 3);
+        QCOMPARE(scan.records.at(0).dedupeKey, scan.records.at(1).dedupeKey);
+        const QTimeZone utc("UTC");
+        const UsageSummary summary = summarizeUsage(scan.records, {}, makeUsageWindow(7, QDateTime(QDate(2026, 8, 8), QTime(12, 0), utc), utc), utc);
+        QCOMPARE(summary.total.records, 2);
+        QCOMPARE(summary.total.tokens, 17.0);
+    }
+
+    void codexSkipsARepeatedTokenCount()
+    {
+        QTemporaryDir dir;
+        const QByteArray turn = QJsonDocument(QJsonObject{{"type", "turn_context"}, {"timestamp", "2026-08-01T05:17:42.694Z"}, {"payload", QJsonObject{{"model", "gpt-5"}}}}).toJson(QJsonDocument::Compact);
+        const QByteArray body = turn + "\n" + codexCount(100, 0, 0, 10, 100, 0, 0, 10, "2026-08-01T05:17:49.919Z") + "\n"
+            + codexCount(100, 0, 0, 10, 100, 0, 0, 10, "2026-08-01T05:17:50.919Z") + "\n";
+        QVERIFY(writeFile(dir.path() + "/codex/sessions/day/session.jsonl", body));
+        const HistoryScan scan = scanHistory(dir.path() + "/claude", dir.path() + "/codex", dir.path() + "/cache");
+        QCOMPARE(scan.records.size(), 1);
+        QCOMPARE(scan.records.at(0).output, 10.0);
+    }
+
+    void codexSubtractsCachedInput()
+    {
+        QTemporaryDir dir;
+        const QByteArray turn = QJsonDocument(QJsonObject{{"type", "turn_context"}, {"timestamp", "2026-08-01T05:17:42.694Z"}, {"payload", QJsonObject{{"model", "gpt-5"}}}}).toJson(QJsonDocument::Compact);
+        const QByteArray body = turn + "\n" + codexCount(100, 40, 10, 5, 100, 40, 10, 5, "2026-08-01T05:17:49.919Z") + "\n";
+        QVERIFY(writeFile(dir.path() + "/codex/sessions/day/session.jsonl", body));
+        const HistoryScan scan = scanHistory(dir.path() + "/claude", dir.path() + "/codex", dir.path() + "/cache");
+        QCOMPARE(scan.records.size(), 1);
+        QCOMPARE(scan.records.at(0).uncached, 50.0);
+        QCOMPARE(scan.records.at(0).cached, 40.0);
+        QCOMPARE(scan.records.at(0).cacheWrite, 10.0);
+        QCOMPARE(scan.records.at(0).output, 5.0);
+    }
+
+    void halfWrittenLineIsIgnoredUntilTheNextScan()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/claude/projects/demo/session.jsonl";
+        QVERIFY(writeFile(path, claudeLine("one", 10, 1) + "\n" + claudeLine("two", 4, 2)));
+        const QString cache = dir.path() + "/cache";
+        HistoryScan first = scanHistory(dir.path() + "/claude", dir.path() + "/codex", cache);
+        QCOMPARE(first.records.size(), 1);
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::Append));
+        QVERIFY(file.write("\n") == 1);
+        file.close();
+        const HistoryScan second = scanHistory(dir.path() + "/claude", dir.path() + "/codex", cache);
+        QCOMPARE(second.records.size(), 2);
+        QCOMPARE(second.records.at(1).uncached, 4.0);
+    }
+
+    void grownFileReadsOnlyTheNewBytes()
+    {
+        QTemporaryDir dir;
+        QByteArray body;
+        for (int i = 0; i < 80; ++i)
+            body += QByteArray(1000, 'x') + "\n";
+        const QByteArray turn = QJsonDocument(QJsonObject{{"type", "turn_context"}, {"timestamp", "2026-08-01T05:17:42.694Z"}, {"payload", QJsonObject{{"model", "gpt-5"}}}}).toJson(QJsonDocument::Compact);
+        body += turn + "\n" + codexCount(100, 0, 0, 10, 100, 0, 0, 10, "2026-08-01T05:17:49.919Z") + "\n";
+        const QString path = dir.path() + "/codex/sessions/day/session.jsonl";
+        QVERIFY(writeFile(path, body));
+        const QString cache = dir.path() + "/cache";
+        const HistoryScan first = scanHistory(dir.path() + "/claude", dir.path() + "/codex", cache);
+        QCOMPARE(first.records.size(), 1);
+        QVERIFY(first.bytesRead > 70000);
+        const QByteArray extra = codexCount(50, 0, 0, 5, 150, 0, 0, 15, "2026-08-01T05:18:49.919Z") + "\n";
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::Append));
+        QCOMPARE(file.write(extra), qint64(extra.size()));
+        file.close();
+        const HistoryScan second = scanHistory(dir.path() + "/claude", dir.path() + "/codex", cache);
+        QCOMPARE(second.records.size(), 2);
+        QCOMPARE(second.records.at(1).output, 5.0);
+        QVERIFY(second.bytesRead <= extra.size() + 64);
+        QVERIFY(second.bytesRead < first.bytesRead / 2);
+        QVERIFY(QFile::exists(cache + "/scan-cache.json"));
+        QVERIFY(!QFile::exists(dir.path() + "/codex/scan-cache.json"));
+    }
+
+    void oldTranscriptIsSkipped()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/claude/projects/demo/session.jsonl";
+        QVERIFY(writeFile(path, claudeLine("one", 10, 1) + "\n"));
+        const qint64 now = QDateTime(QDate(2026, 8, 8), QTime(12, 0), QTimeZone("UTC")).toMSecsSinceEpoch();
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadWrite));
+        QVERIFY(file.setFileTime(QDateTime::fromMSecsSinceEpoch(now - 91LL * 24 * 60 * 60 * 1000), QFileDevice::FileModificationTime));
+        file.close();
+        const HistoryScan scan = scanHistory(dir.path() + "/claude", dir.path() + "/codex", dir.path() + "/cache", now);
+        QCOMPARE(scan.records.size(), 0);
+    }
+
+    void t3CacheWinsOnlyWhenTheVersionIsKnown()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("usage.json");
+        QVERIFY(writeFile(path, R"({"version":9,"models":["claude-opus"],"files":{"a":{"p":"claude","r":[[1000,0,0,1,0,0,1,-1]]}}})"));
+        QVector<UsageRec> records;
+        QVERIFY(readT3UsageCache(path, &records, nullptr));
+        QCOMPARE(records.size(), 1);
+        QVERIFY(writeFile(path, R"({"version":1,"models":[],"files":{}})"));
+        QVERIFY(!readT3UsageCache(path, &records, nullptr));
+        QVERIFY(!readT3UsageCache(dir.filePath("missing"), &records, nullptr));
+    }
+
+    void sharedCodexSessionCountsOnce()
+    {
+        QTemporaryDir dir;
+        const QByteArray meta = QJsonDocument(QJsonObject{{"type", "session_meta"}, {"timestamp", "2026-08-01T05:00:00.000Z"}, {"payload", QJsonObject{{"id", "same"}}}}).toJson(QJsonDocument::Compact);
+        const QByteArray turn = QJsonDocument(QJsonObject{{"type", "turn_context"}, {"timestamp", "2026-08-01T05:17:42.694Z"}, {"payload", QJsonObject{{"model", "gpt-5"}}}}).toJson(QJsonDocument::Compact);
+        const QByteArray body = meta + "\n" + turn + "\n" + codexCount(100, 0, 0, 10, 100, 0, 0, 10, "2026-08-07T05:17:49.919Z") + "\n";
+        QVERIFY(writeFile(dir.path() + "/codex/sessions/a/one.jsonl", body));
+        QVERIFY(writeFile(dir.path() + "/codex/sessions/b/two.jsonl", body));
+        const HistoryScan scan = scanHistory(dir.path() + "/claude", dir.path() + "/codex", dir.path() + "/cache");
+        const QTimeZone utc("UTC");
+        const UsageSummary summary = summarizeUsage(scan.records, {}, makeUsageWindow(7, QDateTime(QDate(2026, 8, 8), QTime(12, 0), utc), utc), utc);
+        QCOMPARE(summary.total.records, 1);
+        QCOMPARE(summary.total.tokens, 110.0);
+    }
+
+    void rateFallbackUsesDownloadThenCacheThenBundle()
+    {
+        QTemporaryDir dir;
+        const QString bundle = dir.filePath("bundle.json");
+        QVERIFY(writeFile(bundle, R"({"claude-opus":{"input_cost_per_token":0.001,"output_cost_per_token":0.002}})"));
+        const QString cache = dir.filePath("cache");
+        const qint64 now = 10'000'000'000;
+        bool fetched = false;
+        const RateLoad bundled = loadModelRates(cache, bundle, now, {});
+        QCOMPARE(bundled.origin, QString("bundled"));
+        QCOMPARE(bundled.rates.value("claude-opus").standard.input, 0.001);
+
+        const QJsonObject cachedDoc{{"claude-opus", QJsonObject{{"input_cost_per_token", 0.009}, {"output_cost_per_token", 0.002}}}};
+        QVERIFY(storeRateDocument(cache, cachedDoc, now - 1000));
+        const RateLoad fresh = loadModelRates(cache, bundle, now, [&] {
+            fetched = true;
+            return QByteArray();
+        });
+        QVERIFY(!fetched);
+        QCOMPARE(fresh.origin, QString("cache"));
+        QCOMPARE(fresh.rates.value("claude-opus").standard.input, 0.009);
+
+        QVERIFY(storeRateDocument(cache, cachedDoc, now - 3LL * 24 * 60 * 60 * 1000));
+        const RateLoad stale = loadModelRates(cache, bundle, now, [] { return QByteArray("nope"); });
+        QCOMPARE(stale.origin, QString("cache"));
+        QCOMPARE(stale.rates.value("claude-opus").standard.input, 0.009);
+
+        QFile::remove(cache + "/model-prices.json");
+        const RateLoad downloaded = loadModelRates(cache, bundle, now, [] {
+            return QByteArray(R"({"claude-opus":{"input_cost_per_token":0.05,"output_cost_per_token":0.02}})");
+        });
+        QCOMPARE(downloaded.origin, QString("download"));
+        QCOMPARE(downloaded.rates.value("claude-opus").standard.input, 0.05);
+        QVERIFY(QFile::exists(cache + "/model-prices.json"));
+
+        QFile::remove(cache + "/model-prices.json");
+        const RateLoad none = loadModelRates(cache, dir.filePath("missing.json"), now, [] { return QByteArray(); });
+        QCOMPARE(none.origin, QString());
+        QVERIFY(none.rates.isEmpty());
+
+        const QHash<QString, ModelRate> builtIn = readRateFile(QStringLiteral(":/model-prices.json"));
+        QVERIFY(builtIn.contains("claude-opus-5-5"));
+        QVERIFY(builtIn.contains("gpt-6.1-sol"));
+        QVERIFY(builtIn.value("claude-opus-5-5").standard.input > 0);
     }
 
 private:

@@ -1,4 +1,4 @@
-// Quota shows limits, usage, and cost from the T3 Code panel.
+// Quota shows limits, usage, and cost from local history.
 
 #include <QFont>
 #include <QGuiApplication>

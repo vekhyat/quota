@@ -20,6 +20,7 @@ class Backend : public QObject {
     Q_PROPERTY(double totalCost READ totalCost NOTIFY dataChanged)
     Q_PROPERTY(double totalTokens READ totalTokens NOTIFY dataChanged)
     Q_PROPERTY(QStringList notices READ notices NOTIFY dataChanged)
+    Q_PROPERTY(QString usageSource READ usageSource NOTIFY dataChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY dataChanged)
     Q_PROPERTY(qint64 cacheAt READ cacheAt NOTIFY dataChanged)
     Q_PROPERTY(qint64 limitsAt READ limitsAt NOTIFY dataChanged)
@@ -27,6 +28,7 @@ class Backend : public QObject {
 
 public:
     explicit Backend(bool preview = false, QObject *parent = nullptr);
+    ~Backend() override;
 
     QString metric() const { return m_metric; }
     int windowDays() const { return m_windowDays; }
@@ -37,6 +39,7 @@ public:
     double totalCost() const { return m_totalCost; }
     double totalTokens() const { return m_totalTokens; }
     QStringList notices() const { return m_notices; }
+    QString usageSource() const { return m_usageSource; }
     bool busy() const { return m_busy; }
     qint64 cacheAt() const { return m_cacheAt; }
     qint64 limitsAt() const { return m_limitsAt; }
@@ -52,7 +55,11 @@ signals:
     void dataChanged();
 
 private:
-    void loadCache();
+    void loadUsage();
+    void startLocalScan();
+    void loadRates(bool preferT3);
+    void fetchRates();
+    void armHistoryWatch(const QStringList &dirs);
     void rebuild();
     void publish();
     void readClaude(int generation);
@@ -83,8 +90,16 @@ private:
     int m_probes = 0;
     int m_generation = 0;
     bool m_hasRates = false;
+    bool m_ratesFromT3 = false;
+    bool m_scanRunning = false;
+    bool m_rescan = false;
+    int m_scanGeneration = 0;
+    class QNetworkReply *m_rateReply = nullptr;
     QString m_t3Home;
     QString m_claudeDir;
+    QString m_codexHome;
+    QString m_cacheDir;
+    QString m_usageSource;
     QString m_grokHome;
     QString m_codexBin;
     QString m_claudeBin;
@@ -95,5 +110,6 @@ private:
     int m_codexStep = 0;
     QFileSystemWatcher m_watcher;
     QTimer m_cacheDebounce;
+    QTimer m_historyDebounce;
     QTimer m_limitTimer;
 };

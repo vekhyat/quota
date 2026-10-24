@@ -5,5 +5,6 @@ TEMPLATE = app
 
 INCLUDEPATH += ../src
 
-HEADERS += ../src/usage.h ../src/theme.h ../src/translator.h
-SOURCES += quota_tests.cpp ../src/usage.cpp ../src/theme.cpp ../src/translator.cpp
+HEADERS += ../src/usage.h ../src/history.h ../src/theme.h ../src/translator.h
+SOURCES += quota_tests.cpp ../src/usage.cpp ../src/history.cpp ../src/theme.cpp ../src/translator.cpp
+RESOURCES += ../src/resources.qrc

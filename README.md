@@ -37,7 +37,7 @@ Press Super + Space, then type Quota.
 
 ## Data
 
-Usage and cost use the T3 Code scan cache at `~/.t3/userdata`. Limits use the Claude, Codex, and Grok logins on this computer. The cost is an API estimate. It is not the subscription bill.
+Usage and cost use the T3 Code scan cache when that file is present. If it is absent, Quota reads Claude and Codex transcripts on this computer. Prices come from the LiteLLM price list, with a built-in copy for offline use. Limits use the Claude, Codex, and Grok logins on this computer. The cost is an API estimate. It is not the subscription bill.
 
 The T3 Code clone is at `~/Work/t3code`.
 

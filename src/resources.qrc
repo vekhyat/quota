@@ -2,5 +2,6 @@
     <qresource prefix="/">
         <file alias="Main.qml">Main.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
+        <file alias="model-prices.json">model-prices.json</file>
     </qresource>
 </RCC>

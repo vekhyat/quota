@@ -299,7 +299,7 @@ ApplicationWindow {
     function noticeText(code) {
         unusedLanguage()
         if (code === "no-cache")
-            return qsTr("T3 Code has no usage cache. Open T3 Code, then press Refresh.")
+            return qsTr("No usage history on this computer.")
         if (code === "no-rates")
             return qsTr("Model prices are missing. Cost stays at 0.")
         if (code === "empty")
@@ -326,6 +326,15 @@ ApplicationWindow {
             return qsTr("Grok uses an API key. No subscription limit.")
         if (code === "limits-busy")
             return qsTr("Limits check in progress.")
+        return ""
+    }
+
+    function sourceText(source) {
+        unusedLanguage()
+        if (source === "t3")
+            return qsTr("From T3 Code")
+        if (source === "local")
+            return qsTr("From local history")
         return ""
     }
 
@@ -806,6 +815,14 @@ ApplicationWindow {
                                     Label {
                                         text: backend.metric === "tokens" ? win.capitalize(win.rangeText(backend.windowDays))
                                             : qsTr("%1. Not the subscription bill.").arg(win.capitalize(win.rangeText(backend.windowDays)))
+                                        color: win.faint
+                                        font.pixelSize: 12
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        visible: backend.usageSource.length > 0
+                                        text: win.sourceText(backend.usageSource)
                                         color: win.faint
                                         font.pixelSize: 12
                                         wrapMode: Text.WordWrap

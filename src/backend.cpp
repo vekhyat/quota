@@ -1,15 +1,19 @@
 #include "backend.h"
 
+#include "history.h"
+
 #include <algorithm>
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QJsonDocument>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QStandardPaths>
 #include <QTimeZone>
+#include <QtConcurrent>
 
 namespace {
 const QStringList kProviderOrder{"claude", "codex", "grok", "cursor", "opencode", "antigravity", "pi", "muse"};
@@ -21,12 +25,30 @@ QString homePath(const char *env, const QString &fallback)
     const QString value = qEnvironmentVariable(env);
     return value.isEmpty() ? fallback : value;
 }
+
+QString firstEnv(const char *first, const char *second, const QString &fallback)
+{
+    const QString primary = qEnvironmentVariable(first);
+    if (!primary.isEmpty())
+        return primary;
+    return homePath(second, fallback);
+}
+}
+
+Backend::~Backend()
+{
+    if (!m_rateReply)
+        return;
+    m_rateReply->disconnect(this);
+    m_rateReply->abort();
 }
 
 Backend::Backend(bool preview, QObject *parent) : QObject(parent), m_preview(preview)
 {
     m_t3Home = homePath("QUOTA_T3_HOME", QDir::homePath() + "/.t3");
-    m_claudeDir = homePath("QUOTA_CLAUDE_DIR", QDir::homePath() + "/.claude");
+    m_claudeDir = firstEnv("QUOTA_CLAUDE_DIR", "CLAUDE_CONFIG_DIR", QDir::homePath() + "/.claude");
+    m_codexHome = firstEnv("QUOTA_CODEX_HOME", "CODEX_HOME", QDir::homePath() + "/.codex");
+    m_cacheDir = homePath("QUOTA_CACHE_DIR", QDir::homePath() + "/.cache/quota");
     m_grokHome = homePath("QUOTA_GROK_HOME", QDir::homePath() + "/.grok");
     m_claudeVersion = qEnvironmentVariable("QUOTA_CLAUDE_VERSION");
     m_claudeBin = homePath("QUOTA_CLAUDE_BIN", QStandardPaths::findExecutable("claude"));
@@ -39,10 +61,17 @@ Backend::Backend(bool preview, QObject *parent) : QObject(parent), m_preview(pre
     m_cacheDebounce.setSingleShot(true);
     m_cacheDebounce.setInterval(200);
     connect(&m_cacheDebounce, &QTimer::timeout, this, [this] {
-        loadCache();
+        loadUsage();
         rebuild();
     });
     connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this] { m_cacheDebounce.start(); });
+    m_historyDebounce.setSingleShot(true);
+    m_historyDebounce.setInterval(1000);
+    connect(&m_historyDebounce, &QTimer::timeout, this, [this] {
+        if (!m_preview)
+            loadUsage();
+    });
+    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_historyDebounce.start(); });
     m_limitTimer.setInterval(5 * 60 * 1000);
     connect(&m_limitTimer, &QTimer::timeout, this, &Backend::refresh);
     if (!m_preview)
@@ -108,7 +137,7 @@ void Backend::refresh()
         rebuild();
         return;
     }
-    loadCache();
+    loadUsage();
     rebuild();
     const int generation = ++m_generation;
     m_busy = true;
@@ -120,32 +149,141 @@ void Backend::refresh()
     readCodex(generation);
 }
 
-void Backend::loadCache()
+void Backend::loadUsage()
 {
     const QString cachePath = m_t3Home + "/userdata/usage-scan-cache-v9.json";
-    const QString ratesPath = m_t3Home + "/userdata/usage-model-rates.json";
-    m_records.clear();
-    m_rates.clear();
-    m_hasRates = false;
-    m_cacheAt = 0;
-    QFile cache(cachePath);
-    if (!cache.open(QIODevice::ReadOnly)) {
-        note("no-cache", true);
-    } else {
-        note("no-cache", false);
-        m_cacheAt = QFileInfo(cache).lastModified().toMSecsSinceEpoch();
-        m_records = parseUsageCache(QJsonDocument::fromJson(cache.readAll()).object());
+    QVector<UsageRec> t3Records;
+    qint64 modified = 0;
+    // The T3 cache wins so the numbers stay the same as the T3 panel.
+    if (readT3UsageCache(cachePath, &t3Records, &modified)) {
+        m_scanGeneration += 1;
+        m_scanRunning = false;
+        m_rescan = false;
+        m_usageSource = "t3";
+        m_records = t3Records;
+        m_cacheAt = modified;
+        note("no-cache", m_records.isEmpty());
         if (!m_watcher.files().contains(cachePath))
             m_watcher.addPath(cachePath);
+        const QStringList watched = m_watcher.directories();
+        for (const QString &path : watched)
+            m_watcher.removePath(path);
+        loadRates(true);
+        return;
     }
-    QFile rates(ratesPath);
-    if (rates.open(QIODevice::ReadOnly)) {
-        const QJsonObject root = QJsonDocument::fromJson(rates.readAll()).object();
-        const QJsonValue document = root.value("document");
-        m_rates = parseRateTable(document.isObject() ? document.toObject() : root);
-        m_hasRates = !m_rates.isEmpty();
+    if (m_usageSource != "local") {
+        m_records.clear();
+        m_cacheAt = 0;
     }
+    m_usageSource = "local";
+    note("no-cache", false);
+    loadRates(false);
+    startLocalScan();
+}
+
+void Backend::startLocalScan()
+{
+    if (m_preview || m_usageSource != "local")
+        return;
+    if (m_scanRunning) {
+        m_rescan = true;
+        return;
+    }
+    m_scanRunning = true;
+    const int generation = ++m_scanGeneration;
+    const QString claudeDir = m_claudeDir;
+    const QString codexHome = m_codexHome;
+    const QString cacheDir = m_cacheDir;
+    auto *watcher = new QFutureWatcher<HistoryScan>(this);
+    connect(watcher, &QFutureWatcher<HistoryScan>::finished, this, [this, watcher, generation] {
+        const HistoryScan scan = watcher->result();
+        watcher->deleteLater();
+        if (generation != m_scanGeneration || m_usageSource != "local")
+            return;
+        m_scanRunning = false;
+        m_records = scan.records;
+        m_cacheAt = QDateTime::currentMSecsSinceEpoch();
+        note("no-cache", m_records.isEmpty());
+        armHistoryWatch(scan.directories);
+        rebuild();
+        if (m_rescan) {
+            m_rescan = false;
+            startLocalScan();
+        } else if (scan.rescan) {
+            m_historyDebounce.start();
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([claudeDir, codexHome, cacheDir] {
+        return scanHistory(claudeDir, codexHome, cacheDir, 0);
+    }));
+}
+
+void Backend::armHistoryWatch(const QStringList &dirs)
+{
+    const QStringList current = m_watcher.directories();
+    for (const QString &path : current) {
+        if (!dirs.contains(path))
+            m_watcher.removePath(path);
+    }
+    for (const QString &path : dirs) {
+        if (!m_watcher.directories().contains(path))
+            m_watcher.addPath(path);
+    }
+}
+
+void Backend::loadRates(bool preferT3)
+{
+    if (preferT3) {
+        const QHash<QString, ModelRate> t3Rates = readRateFile(m_t3Home + "/userdata/usage-model-rates.json");
+        if (!t3Rates.isEmpty()) {
+            m_rates = t3Rates;
+            m_hasRates = true;
+            m_ratesFromT3 = true;
+            note("no-rates", false);
+            return;
+        }
+    }
+    m_ratesFromT3 = false;
+    const RateLoad loaded = loadModelRates(m_cacheDir, QStringLiteral(":/model-prices.json"));
+    if (!loaded.rates.isEmpty())
+        m_rates = loaded.rates;
+    m_hasRates = !m_rates.isEmpty();
     note("no-rates", !m_hasRates);
+    if (loaded.refresh)
+        fetchRates();
+}
+
+void Backend::fetchRates()
+{
+    if (m_rateReply || m_preview)
+        return;
+    // This is the same LiteLLM price file that T3 Code downloads.
+    QNetworkRequest request(QUrl(QStringLiteral(
+        "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json")));
+    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("quota"));
+    request.setTransferTimeout(10000);
+    m_rateReply = m_network.get(request);
+    m_rateReply->setParent(this);
+    connect(m_rateReply, &QNetworkReply::finished, this, [this] {
+        QNetworkReply *reply = m_rateReply;
+        m_rateReply = nullptr;
+        if (!reply)
+            return;
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+            return;
+        const QJsonObject document = QJsonDocument::fromJson(reply->readAll()).object();
+        const QHash<QString, ModelRate> parsed = parseRateTable(document);
+        if (parsed.isEmpty())
+            return;
+        storeRateDocument(m_cacheDir, document, QDateTime::currentMSecsSinceEpoch());
+        if (m_ratesFromT3)
+            return;
+        m_rates = parsed;
+        m_hasRates = true;
+        note("no-rates", false);
+        rebuild();
+    });
 }
 
 void Backend::rebuild()
@@ -172,7 +310,7 @@ void Backend::rebuild()
     }
     m_totalCost = summary.total.cost;
     m_totalTokens = summary.total.tokens;
-    note("empty", summary.total.records == 0 && !m_notices.contains("no-cache"));
+    note("empty", summary.total.records == 0 && !m_notices.contains("no-cache") && !m_scanRunning);
     note("unpriced", summary.total.unpriced > 0);
 
     const double shareBase = m_metric == "tokens" ? summary.total.tokens : summary.total.cost;
@@ -414,8 +552,7 @@ static QString jwtAccountId(const QString &jwt)
 
 void Backend::readCodex(int generation)
 {
-    const QString codexHome = homePath("QUOTA_CODEX_HOME", QDir::homePath() + "/.codex");
-    QFile authFile(codexHome + "/auth.json");
+    QFile authFile(m_codexHome + "/auth.json");
     QString token;
     QString accountId;
     if (authFile.open(QIODevice::ReadOnly)) {
