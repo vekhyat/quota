@@ -6,17 +6,13 @@ Quota shows limits, usage, and cost. It reads the same local history as the T3 C
 
 ## Install
 
-From the AUR:
+Install the package from the latest release:
 
 ```sh
-yay -S quota
+sudo pacman -U https://github.com/vekhyat/quota/releases/download/v0.1.0/quota-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
-Or download the package from the latest release, then install it:
-
-```sh
-sudo pacman -U quota-*.pkg.tar.zst
-```
+It conflicts with `quota-tools`, since both install `/usr/bin/quota`.
 
 Or build and install from source with `bin/install`. It needs `qmake6`, `make`, and Qt 6 (`qt6-base`, `qt6-declarative`, `qt6-wayland`).
 
