@@ -1,16 +1,16 @@
 # Maintainer: Vekhyat Jain <vekhyatjain123 at gmail dot com>
 pkgname=quota
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Show Claude, Codex, and Grok limits, usage, and cost'
 arch=('x86_64' 'aarch64')
 url='https://github.com/vekhyat/quota'
 license=('MIT')
-depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'gcc-libs' 'glibc')
+depends=('qt6-base>=6.4' 'qt6-declarative>=6.4' 'qt6-wayland' 'gcc-libs' 'glibc')
 # Both packages install /usr/bin/quota.
 conflicts=('quota-tools')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('37fee371f1ebe084c95e24fbf65596474fc357d0b4f928bb0bce9eee34a39dae')
+sha256sums=('6538806191883b314f1ec18bc2b2b8adfc253fc0c2443cb5d0d9f400e263ed5d')
 
 build() {
   cd "$pkgname-$pkgver"
@@ -22,11 +22,7 @@ build() {
 
 check() {
   cd "$pkgname-$pkgver"
-  mkdir -p build/tests
-  cd build/tests
-  qmake6 ../../tests/quota_tests.pro
-  make
-  QT_QPA_PLATFORM=offscreen ./quota_tests
+  ./bin/test
 }
 
 package() {
