@@ -1,0 +1,72 @@
+name: Release
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the AppImage to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    # The oldest supported base sets the glibc floor, so the AppImage also runs on
+    # Debian 12, Ubuntu 22.04, and newer distributions.
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      QT_VERSION: 6.8.3
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libegl1 \
+            libwayland-dev libfontconfig1 libfuse2 file
+          python3 -m pip install --user aqtinstall
+          python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$RUNNER_TEMP/qt" -m qtwaylandcompositor
+          echo "$RUNNER_TEMP/qt/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: QMAKE=qmake bin/build
+
+      - name: Make the AppImage
+        run: |
+          base=https://github.com/linuxdeploy
+          curl -fsSLo linuxdeploy "$base/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          curl -fsSLo linuxdeploy-plugin-qt "$base/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          chmod +x linuxdeploy linuxdeploy-plugin-qt
+          plugins="$RUNNER_TEMP/qt/$QT_VERSION/gcc_64/plugins/platforms"
+          # Wayland desktops use the Wayland plugin; X11 and XWayland use xcb.
+          export EXTRA_PLATFORM_PLUGINS="$(cd "$plugins" && ls libqwayland-*.so 2>/dev/null | paste -sd ';')"
+          export QML_SOURCES_PATHS="$PWD/src"
+          export QMAKE="$RUNNER_TEMP/qt/$QT_VERSION/gcc_64/bin/qmake"
+          export LDAI_OUTPUT="Quota-x86_64.AppImage"
+          ./linuxdeploy --appdir AppDir --executable build/quota \
+            --desktop-file pkgbuild/quota.desktop --icon-file pkgbuild/quota.svg \
+            --plugin qt --output appimage
+          test -s Quota-x86_64.AppImage
+
+      - name: Check that it starts
+        run: |
+          home="$(mktemp -d)"
+          HOME="$home" QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+            ./Quota-x86_64.AppImage --appimage-extract-and-run --preview "$home/preview.png" 960x1100
+          test -s "$home/preview.png"
+
+      - name: Attach to the release
+        run: |
+          gh release upload "$TAG" Quota-x86_64.AppImage --clobber
+          mkdir assets
+          gh release download "$TAG" --dir assets --pattern '*'
+          rm -f assets/SHA256SUMS
+          (cd assets && sha256sum * > SHA256SUMS)
+          gh release upload "$TAG" assets/SHA256SUMS --clobber

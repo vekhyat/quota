@@ -6,20 +6,42 @@ Quota shows limits, usage, and cost. It reads the same local history as the T3 C
 
 ## Install on Linux
 
-Quota targets Linux with Qt 6.4 or newer, on Wayland or X11. Omarchy and Hyprland are optional; other desktops use the default accent and square corners. Build from source on the target computer so Qt and system libraries match. Windows and macOS are not supported builds.
+```sh
+curl -fsSL https://raw.githubusercontent.com/vekhyat/quota/main/install.sh | sh
+```
 
-Download the Arch x86_64 package from [release v0.3.0](https://github.com/vekhyat/quota/releases/tag/v0.3.0), then install it with `sudo pacman -U /path/to/quota-0.3.0-1-x86_64.pkg.tar.zst`. The binary requires the Qt version listed in its package dependencies; source builds support Qt 6.4 or newer.
+Then open **Quota** from your application menu. That's all: no compiler, no `sudo`, no Qt packages. The installer downloads the prebuilt app from the latest release, checks it against the release checksums, and puts it in `~/.local`. It runs on x86_64 Linux from Ubuntu 22.04 and Debian 12 onward, including Fedora and Arch, on Wayland or X11.
 
-To build on Arch Linux:
+To update, run the same command again. To remove Quota:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vekhyat/quota/main/install.sh | sh -s -- --uninstall
+```
+
+You can also download `Quota-x86_64.AppImage` from the [latest release](https://github.com/vekhyat/quota/releases/latest) and run it directly. Running an AppImage directly needs FUSE (`libfuse2`); the installer does not.
+
+On Omarchy or Hyprland, Quota follows the theme accent and window corners. Other desktops get the default accent and square corners. If your GPU driver misbehaves, start it with `QT_QUICK_BACKEND=software quota`.
+
+### Arch Linux package
+
+The release also has an Arch package, built against Arch's current Qt:
+
+```sh
+sudo pacman -U https://github.com/vekhyat/quota/releases/latest/download/quota-VERSION-1-x86_64.pkg.tar.zst
+```
+
+Replace `VERSION` with the release number. The package conflicts with `quota-tools`, since both install `/usr/bin/quota`; the installer above has no such conflict.
+
+### Build from source
+
+Quota needs Qt 6.4 or newer. On Arch Linux:
 
 ```sh
 sudo pacman -S --needed base-devel qt6-base qt6-declarative qt6-wayland
 bin/install
 ```
 
-This builds, tests, and installs an Arch package. The system package conflicts with `quota-tools` because both install `/usr/bin/quota`. To keep `quota-tools`, use `bin/install --user` instead (requires Python 3); launch Quota from the desktop menu or `~/.local/bin/quota`.
-
-On Debian 12 / Ubuntu 24.04 and newer:
+On Debian 12, Ubuntu 24.04, or newer:
 
 ```sh
 sudo apt install build-essential qmake6 qt6-base-dev qt6-declarative-dev qt6-wayland python3 \
@@ -28,9 +50,7 @@ sudo apt install build-essential qmake6 qt6-base-dev qt6-declarative-dev qt6-way
 bin/install
 ```
 
-Outside Arch, installation goes into `~/.local` without sudo. `PREFIX` overrides that location. On other distributions, install the equivalent Qt development packages, QML modules, and build tools, then run `bin/install --user`. `QMAKE` can select a Qt 6 qmake executable, and `JOBS` sets build parallelism.
-
-Open **Quota** from your desktop's application menu. You can also run `build/quota` after `bin/build`. For systems with problematic GPU drivers, try `QT_QUICK_BACKEND=software build/quota`.
+On Arch, `bin/install` builds and installs a system package. Elsewhere, or with `bin/install --user`, it installs into `~/.local` without `sudo` (needs Python 3). `PREFIX` changes the location, `QMAKE` picks a Qt 6 qmake, and `JOBS` sets build parallelism.
 
 ## Two Codex accounts
 

@@ -1,5 +1,5 @@
 pkgname=quota
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc='Show limits, usage, and cost'
 arch=('x86_64' 'aarch64')

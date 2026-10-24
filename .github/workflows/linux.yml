@@ -21,6 +21,7 @@ jobs:
       - run: bin/build
       - run: bin/test
       - run: bin/smoke
+      - run: sh -n install.sh
       - name: Verify user installation
         run: |
           PREFIX="$RUNNER_TEMP/quota install" bin/install --user
