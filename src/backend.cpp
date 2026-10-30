@@ -357,7 +357,7 @@ void Backend::rebuild()
                                     {"tokens", model.tokens}});
     }
     // One bucket per hour for the rolling 24 hours, one per day otherwise. Each bucket
-    // splits its value by provider so the chart can stack them.
+    // splits its value by provider so the chart can draw one series per provider.
     m_buckets.clear();
     const auto bucket = [&](const QHash<QString, UsageSlice> &byProvider) {
         QVariantList parts;

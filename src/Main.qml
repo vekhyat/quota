@@ -43,12 +43,12 @@ ApplicationWindow {
         return list
     }
     readonly property var sortedModels: backend.models.slice().sort(function (a, b) { return metricValue(b) - metricValue(a) })
-    readonly property real bucketPeak: {
-        var peak = 0
-        for (var i = 0; i < backend.buckets.length; ++i)
-            peak = Math.max(peak, backend.buckets[i].value)
-        return peak
-    }
+    // T3 Code's provider order and colors, so the chart reads the same in both apps.
+    readonly property var chartOrder: ["codex", "claude", "grok", "cursor", "opencode", "antigravity", "pi", "muse"]
+    readonly property string grokColor: mixOklab(ink, bg, 0.72).toString()
+    readonly property color chartGrid: Qt.rgba(1, 1, 1, 0.08)
+    // A locale that writes "AP" in its short time format uses a 12-hour clock.
+    readonly property bool hour12: /a/i.test(Qt.locale().timeFormat(Locale.ShortFormat))
     readonly property var usageStats: {
         unusedLanguage()
         var hourly = backend.buckets.length > 0 && backend.buckets[0].day === undefined
@@ -102,40 +102,145 @@ ApplicationWindow {
         return Math.round(n).toLocaleString(locale, "f", 0)
     }
 
-    // Every axis label uses the decimals the half step needs, so 0, 5, and 10 read alike.
-    function formatAxis(value, step) {
-        unusedLanguage()
-        if (backend.metric === "tokens")
-            return formatTokens(value)
-        var decimals = 2
-        for (var d = 0; d < 2; ++d) {
-            var scaled = step * Math.pow(10, d)
-            if (Math.abs(scaled - Math.round(scaled)) < 1e-6) {
-                decimals = d
-                break
+    // The chart formats numbers as T3 Code does: en-US dollars and short token counts.
+    function chartMetric(value) {
+        if (backend.metric !== "tokens")
+            return "$" + Number(value).toLocaleString(Qt.locale("en_US"), "f", 2)
+        var n = Number(value)
+        var units = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]]
+        for (var i = 0; i < units.length; ++i) {
+            if (Math.abs(n) < units[i][0])
+                continue
+            var scaled = n / units[i][0]
+            var digits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2
+            return scaled.toFixed(digits).replace(/\.0+$/, "") + units[i][1]
+        }
+        return Math.round(n).toLocaleString(Qt.locale("en_US"), "f", 0)
+    }
+
+    function chartHour(ms) {
+        var hour = new Date(ms).getHours()
+        if (!hour12)
+            return (hour < 10 ? "0" : "") + hour + ":00"
+        return (hour % 12 === 0 ? 12 : hour % 12) + (hour < 12 ? " AM" : " PM")
+    }
+
+    function chartDay(date) {
+        var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        return months[date.getMonth()] + " " + date.getDate()
+    }
+
+    function bucketDate(entry) {
+        if (entry.day === undefined)
+            return new Date(entry.start)
+        var parts = String(entry.day).split("-")
+        return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
+    }
+
+    function chartPeriod(entry) {
+        if (!entry)
+            return ""
+        return entry.day === undefined ? chartHour(entry.start) : chartDay(bucketDate(entry))
+    }
+
+    // "3 PM today", "3 PM yesterday", then "Oct 27, 3 PM" for older hours.
+    function chartTooltipPeriod(entry) {
+        if (!entry || entry.day !== undefined)
+            return chartPeriod(entry)
+        var day = bucketDate(entry)
+        var today = new Date(win.now)
+        var daysAgo = Math.round((new Date(today.getFullYear(), today.getMonth(), today.getDate())
+                                  - new Date(day.getFullYear(), day.getMonth(), day.getDate())) / 86400000)
+        if (daysAgo === 0)
+            return qsTr("%1 today").arg(chartHour(entry.start))
+        if (daysAgo === 1)
+            return qsTr("%1 yesterday").arg(chartHour(entry.start))
+        return chartDay(day) + ", " + chartHour(entry.start)
+    }
+
+    // Steps of 1, 2, 5, or 10 times a power of ten, about `count` steps up to the peak.
+    function niceScale(peak, count) {
+        if (peak <= 0)
+            return { max: 0, ticks: [0] }
+        var raw = peak / count
+        var magnitude = Math.pow(10, Math.floor(Math.log10(raw)))
+        var normalized = raw / magnitude
+        var step = (normalized > 5 ? 10 : normalized > 2 ? 5 : normalized > 1 ? 2 : 1) * magnitude
+        var max = Math.ceil(peak / step) * step
+        var ticks = []
+        for (var value = 0; value <= max + step * 1e-6; value += step)
+            ticks.push(value)
+        return { max: max, ticks: ticks }
+    }
+
+    // Monotone cubic segments, so a curve never overshoots below zero or above a peak.
+    function smoothCurve(points) {
+        var count = points.length
+        if (count < 2)
+            return []
+        var slopes = []
+        for (var i = 0; i < count - 1; ++i) {
+            var dx = points[i + 1].x - points[i].x
+            slopes.push(dx === 0 ? 0 : (points[i + 1].y - points[i].y) / dx)
+        }
+        var tangents = Array.from({ length: count }, function () { return 0 })
+        tangents[0] = slopes[0]
+        tangents[count - 1] = slopes[count - 2]
+        for (var j = 1; j < count - 1; ++j)
+            tangents[j] = slopes[j - 1] * slopes[j] <= 0 ? 0 : (slopes[j - 1] + slopes[j]) / 2
+        for (var k = 0; k < count - 1; ++k) {
+            if (slopes[k] === 0) {
+                tangents[k] = 0
+                tangents[k + 1] = 0
+                continue
+            }
+            var a = tangents[k] / slopes[k]
+            var b = tangents[k + 1] / slopes[k]
+            var magnitude = a * a + b * b
+            if (magnitude > 9) {
+                var scale = 3 / Math.sqrt(magnitude)
+                tangents[k] = scale * a * slopes[k]
+                tangents[k + 1] = scale * b * slopes[k]
             }
         }
-        return qsTr("%1 USD").arg(Number(value).toLocaleString(Qt.locale(), "f", decimals))
+        var segments = []
+        for (var s = 0; s < count - 1; ++s) {
+            var from = points[s]
+            var to = points[s + 1]
+            var step = to.x - from.x
+            segments.push({ from: from, to: to,
+                            c1: { x: from.x + step / 3, y: from.y + tangents[s] * step / 3 },
+                            c2: { x: to.x - step / 3, y: to.y - tangents[s + 1] * step / 3 } })
+        }
+        return segments
     }
 
-    // Rounds a peak up to 1, 2, 2.5, or 5 times a power of ten, so the axis reads in round steps.
-    function niceMax(peak) {
-        if (peak <= 0)
-            return 0
-        var step = Math.pow(10, Math.floor(Math.log(peak) / Math.LN10))
-        var f = peak / step
-        return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * step
-    }
-
-    function tickIndexes(count) {
-        if (count <= 0)
-            return []
-        if (count <= 7)
-            return Array.from({ length: count }, function (_, i) { return i })
-        var ticks = []
-        for (var k = 0; k < 5; ++k)
-            ticks.push(Math.round(k * (count - 1) / 4))
-        return ticks
+    // CSS color-mix(in oklab, a weight, b), which T3 Code uses for the Grok color.
+    function mixOklab(a, b, weight) {
+        function linear(c) { return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4) }
+        function encode(c) {
+            c = Math.max(0, Math.min(1, c))
+            return c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055
+        }
+        function lab(c) {
+            var r = linear(c.r), g = linear(c.g), bl = linear(c.b)
+            var l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl)
+            var m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl)
+            var s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl)
+            return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+                    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+                    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s]
+        }
+        var x = lab(a), y = lab(b)
+        var L = x[0] * weight + y[0] * (1 - weight)
+        var A = x[1] * weight + y[1] * (1 - weight)
+        var B = x[2] * weight + y[2] * (1 - weight)
+        var l3 = Math.pow(L + 0.3963377774 * A + 0.2158037573 * B, 3)
+        var m3 = Math.pow(L - 0.1055613458 * A - 0.0638541728 * B, 3)
+        var s3 = Math.pow(L - 0.0894841775 * A - 1.2914855480 * B, 3)
+        return Qt.rgba(encode(4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3),
+                       encode(-1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3),
+                       encode(-0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3), 1)
     }
 
     function bucketLabel(entry, dayPattern) {
@@ -274,12 +379,13 @@ ApplicationWindow {
 
     function providerColor(id) {
         if (id === "claude") return "#d97757"
-        if (id === "codex") return "#e7e7ea"
-        if (id === "grok") return "#c4b5a0"
+        if (id === "codex") return ink.toString()
+        if (id === "grok") return grokColor
+        if (id === "cursor") return "#8b8b8b"
         if (id === "pi") return "#4d9f8a"
         if (id === "opencode") return "#5b9bbd"
         if (id === "antigravity") return "#8c7bd1"
-        if (id === "muse") return "#6ea8ff"
+        if (id === "muse") return "#0866ff"
         return theme.accent
     }
 
@@ -933,161 +1039,300 @@ ApplicationWindow {
                                 }
                             }
 
-                            Item {
-                                id: chart
-                                objectName: "usageChart"
+                            // Same chart as T3 Code's usage page: one smoothed area per provider,
+                            // layered rather than stacked, drawn in a 960 x 260 view box.
+                            ColumnLayout {
                                 visible: backend.buckets.length > 0
                                 Layout.fillWidth: true
-                                implicitHeight: 190
-                                readonly property int count: backend.buckets.length
-                                readonly property bool hourly: count > 0 && backend.buckets[0].day === undefined
-                                readonly property real gutter: 64
-                                readonly property real plotTop: 8
-                                readonly property real plotBottom: height - 24
-                                readonly property real plotHeight: plotBottom - plotTop
-                                readonly property real slot: count > 0 ? (width - gutter) / count : 0
-                                readonly property real barWidth: Math.max(2, Math.min(36, slot * (count > 31 ? 0.72 : 0.6)))
-                                readonly property real scale: win.niceMax(win.bucketPeak)
-                                property int hovered: -1
+                                spacing: 12
 
-                                Repeater {
-                                    model: [1, 0.5, 0]
-                                    delegate: Item {
-                                        required property real modelData
-                                        y: chart.plotTop + chart.plotHeight * (1 - modelData)
-                                        width: chart.width
-                                        Rectangle {
-                                            x: chart.gutter
-                                            width: chart.width - chart.gutter
-                                            height: 1
-                                            color: modelData === 0 ? win.line : Qt.rgba(1, 1, 1, 0.05)
-                                        }
-                                        Label {
-                                            visible: chart.scale > 0
-                                            width: chart.gutter - 12
-                                            anchors.verticalCenter: parent.top
-                                            horizontalAlignment: Text.AlignRight
-                                            text: win.formatAxis(chart.scale * modelData, chart.scale / 2)
-                                            color: win.faint
-                                            font.pixelSize: 11
-                                        }
-                                    }
+                                Label {
+                                    text: chart.hourly
+                                          ? (backend.metric === "tokens" ? qsTr("Hourly processed tokens") : qsTr("Hourly cost"))
+                                          : (backend.metric === "tokens" ? qsTr("Daily processed tokens") : qsTr("Daily cost"))
+                                    color: win.ink
+                                    font.pixelSize: 14
+                                    font.weight: Font.Medium
                                 }
 
-                                Repeater {
-                                    model: backend.buckets
-                                    delegate: Item {
-                                        id: bucketItem
-                                        required property var modelData
-                                        required property int index
-                                        x: chart.gutter + index * chart.slot
-                                        y: chart.plotTop
-                                        width: chart.slot
-                                        height: chart.plotHeight
-                                        opacity: chart.hovered >= 0 && chart.hovered !== index ? 0.35 : 1
-                                        Behavior on opacity { NumberAnimation { duration: 120 } }
+                                Item {
+                                    id: chart
+                                    objectName: "usageChart"
+                                    Layout.fillWidth: true
+                                    implicitHeight: plotArea.height + 4 + axisRow.height
+                                    readonly property int count: backend.buckets.length
+                                    readonly property bool hourly: count > 0 && backend.buckets[0].day === undefined
+                                    readonly property real viewWidth: 960
+                                    readonly property real viewHeight: 260
+                                    readonly property real viewTop: 8
+                                    property int hovered: -1
+                                    property real hoverX: 0
+                                    property real hoverY: 0
 
-                                        Rectangle {
-                                            visible: bucketItem.modelData.value <= 0
-                                            anchors.bottom: parent.bottom
-                                            anchors.horizontalCenter: parent.horizontalCenter
-                                            width: chart.barWidth
-                                            height: 2
-                                            color: win.raised
+                                    readonly property var series: {
+                                        var values = {}
+                                        var totals = {}
+                                        var peak = 0
+                                        for (var i = 0; i < count; ++i) {
+                                            var parts = backend.buckets[i].parts
+                                            for (var j = 0; j < parts.length; ++j) {
+                                                var id = parts[j].provider
+                                                if (!values[id]) {
+                                                    values[id] = Array.from({ length: count }, function () { return 0 })
+                                                    totals[id] = 0
+                                                }
+                                                values[id][i] += parts[j].value
+                                                totals[id] += parts[j].value
+                                                peak = Math.max(peak, values[id][i])
+                                            }
                                         }
+                                        var providers = win.chartOrder.filter(function (id) { return totals[id] > 0 })
+                                        for (var key in totals)
+                                            if (totals[key] > 0 && providers.indexOf(key) < 0)
+                                                providers.push(key)
+                                        // The largest series paints first, so smaller ones stay visible on top.
+                                        var paint = providers.slice().sort(function (a, b) { return totals[b] - totals[a] })
+                                        return { values: values, providers: providers, paint: paint, scale: win.niceScale(peak, 4) }
+                                    }
 
-                                        Column {
-                                            anchors.bottom: parent.bottom
-                                            anchors.horizontalCenter: parent.horizontalCenter
-                                            width: chart.barWidth
-                                            Repeater {
-                                                model: bucketItem.modelData.parts.slice().reverse()
-                                                delegate: Rectangle {
-                                                    required property var modelData
-                                                    required property int index
-                                                    width: chart.barWidth
-                                                    height: chart.scale > 0 ? chart.plotHeight * modelData.value / chart.scale : 0
-                                                    color: win.providerColor(modelData.provider)
-                                                    radius: index === 0 ? Math.min(3, theme.radius, width / 2) : 0
+                                    function viewY(value) {
+                                        var max = series.scale.max
+                                        return max === 0 ? viewHeight : viewHeight - value / max * (viewHeight - viewTop)
+                                    }
+
+                                    function columnTotal(index) {
+                                        var sum = 0
+                                        for (var i = 0; i < series.providers.length; ++i)
+                                            sum += series.values[series.providers[i]][index]
+                                        return sum
+                                    }
+
+                                    onSeriesChanged: canvas.requestPaint()
+
+                                    Item {
+                                        id: tickColumn
+                                        width: 56
+                                        height: plotArea.height
+                                        Repeater {
+                                            model: chart.series.scale.ticks
+                                            delegate: Label {
+                                                required property real modelData
+                                                anchors.right: parent.right
+                                                y: chart.viewY(modelData) / chart.viewHeight * tickColumn.height - height / 2
+                                                text: modelData === 0 ? "0" : win.chartMetric(modelData)
+                                                color: win.muted
+                                                font.pixelSize: 10
+                                            }
+                                        }
+                                    }
+
+                                    Item {
+                                        id: plotArea
+                                        x: tickColumn.width + 8
+                                        width: chart.width - x
+                                        height: 224
+                                        readonly property real stepX: chart.count < 2 ? 0 : width / (chart.count - 1)
+
+                                        Canvas {
+                                            id: canvas
+                                            anchors.fill: parent
+                                            onWidthChanged: requestPaint()
+                                            onHeightChanged: requestPaint()
+
+                                            onPaint: {
+                                                var ctx = getContext("2d")
+                                                ctx.reset()
+                                                var sx = width / chart.viewWidth
+                                                var sy = height / chart.viewHeight
+                                                var ticks = chart.series.scale.ticks
+                                                ctx.lineWidth = 1
+                                                ctx.strokeStyle = "rgba(255, 255, 255, 0.08)"
+                                                for (var t = 0; t < ticks.length; ++t) {
+                                                    var gy = Math.min(height - 0.5, Math.max(0.5, Math.round(chart.viewY(ticks[t]) * sy) + 0.5))
+                                                    ctx.beginPath()
+                                                    ctx.moveTo(0, gy)
+                                                    ctx.lineTo(width, gy)
+                                                    ctx.stroke()
+                                                }
+                                                if (chart.count < 2)
+                                                    return
+
+                                                var stepX = chart.viewWidth / (chart.count - 1)
+                                                var curves = chart.series.paint.map(function (id) {
+                                                    var points = chart.series.values[id].map(function (v, i) {
+                                                        return { x: i * stepX, y: chart.viewY(v) }
+                                                    })
+                                                    return { color: win.providerColor(id), segments: win.smoothCurve(points) }
+                                                })
+                                                function trace(segments) {
+                                                    ctx.moveTo(segments[0].from.x * sx, segments[0].from.y * sy)
+                                                    for (var s = 0; s < segments.length; ++s) {
+                                                        var seg = segments[s]
+                                                        ctx.bezierCurveTo(seg.c1.x * sx, seg.c1.y * sy, seg.c2.x * sx, seg.c2.y * sy,
+                                                                          seg.to.x * sx, seg.to.y * sy)
+                                                    }
+                                                }
+
+                                                ctx.globalAlpha = 0.12
+                                                for (var a = 0; a < curves.length; ++a) {
+                                                    ctx.beginPath()
+                                                    trace(curves[a].segments)
+                                                    ctx.lineTo(width, height)
+                                                    ctx.lineTo(0, height)
+                                                    ctx.closePath()
+                                                    ctx.fillStyle = curves[a].color
+                                                    ctx.fill()
+                                                }
+                                                ctx.globalAlpha = 1
+                                                ctx.lineWidth = 2
+                                                ctx.lineJoin = "round"
+                                                for (var l = 0; l < curves.length; ++l) {
+                                                    ctx.beginPath()
+                                                    trace(curves[l].segments)
+                                                    ctx.strokeStyle = curves[l].color
+                                                    ctx.stroke()
                                                 }
                                             }
+                                        }
+
+                                        Rectangle {
+                                            visible: chart.hovered >= 0
+                                            x: Math.round(chart.hovered * plotArea.stepX)
+                                            y: chart.viewTop / chart.viewHeight * plotArea.height
+                                            width: 1
+                                            height: plotArea.height - y
+                                            color: win.muted
                                         }
 
                                         MouseArea {
                                             anchors.fill: parent
                                             hoverEnabled: true
-                                            onEntered: chart.hovered = bucketItem.index
-                                            onExited: if (chart.hovered === bucketItem.index) chart.hovered = -1
+                                            onPositionChanged: function (mouse) {
+                                                if (chart.count === 0)
+                                                    return
+                                                chart.hoverX = Math.max(0, Math.min(width, mouse.x))
+                                                chart.hoverY = Math.max(0, Math.min(height, mouse.y))
+                                                chart.hovered = Math.max(0, Math.min(chart.count - 1,
+                                                                                     Math.round(chart.hoverX / width * (chart.count - 1))))
+                                            }
+                                            onExited: chart.hovered = -1
                                         }
-                                    }
-                                }
 
-                                Repeater {
-                                    model: win.tickIndexes(chart.count)
-                                    delegate: Label {
-                                        required property int modelData
-                                        readonly property real center: chart.gutter + (modelData + 0.5) * chart.slot
-                                        x: Math.max(chart.gutter, Math.min(chart.width - width, center - width / 2))
-                                        y: chart.plotBottom + 8
-                                        text: win.bucketLabel(backend.buckets[modelData], chart.count <= 7 ? "ddd" : "d MMM")
-                                        color: win.faint
-                                        font.pixelSize: 11
-                                    }
-                                }
+                                        Rectangle {
+                                            id: tip
+                                            readonly property int index: chart.hovered
+                                            readonly property real gap: 12
+                                            visible: index >= 0 && index < chart.count
+                                            width: Math.max(144, tipBody.implicitWidth + 20)
+                                            height: tipBody.implicitHeight + 16
+                                            x: {
+                                                var left = chart.hoverX + gap + width <= plotArea.width ? chart.hoverX + gap : chart.hoverX - gap - width
+                                                return Math.min(Math.max(0, left), Math.max(0, plotArea.width - width))
+                                            }
+                                            y: {
+                                                var top = chart.hoverY + gap + height <= plotArea.height ? chart.hoverY + gap : chart.hoverY - gap - height
+                                                return Math.min(Math.max(0, top), Math.max(0, plotArea.height - height))
+                                            }
+                                            radius: 12
+                                            color: Qt.rgba(win.bg.r, win.bg.g, win.bg.b, 0.9)
+                                            border.color: Qt.rgba(1, 1, 1, 0.04)
 
-                                Rectangle {
-                                    id: tip
-                                    readonly property var entry: chart.hovered >= 0 && chart.hovered < chart.count ? backend.buckets[chart.hovered] : null
-                                    readonly property real center: chart.gutter + (chart.hovered + 0.5) * chart.slot
-                                    visible: entry !== null
-                                    width: tipBody.implicitWidth + 24
-                                    height: tipBody.implicitHeight + 20
-                                    x: center + chart.barWidth / 2 + 8 + width <= chart.width ? center + chart.barWidth / 2 + 8
-                                                                                          : center - chart.barWidth / 2 - 8 - width
-                                    y: chart.plotTop
-                                    radius: win.smallRadius
-                                    color: win.raised
-                                    border.color: win.line
-
-                                    ColumnLayout {
-                                        id: tipBody
-                                        anchors.centerIn: parent
-                                        spacing: 6
-                                        Label {
-                                            text: tip.entry ? win.bucketRange(tip.entry, "dddd d MMM") : ""
-                                            color: win.muted
-                                            font.pixelSize: 11
-                                        }
-                                        Label {
-                                            text: tip.entry ? win.formatMetric(tip.entry.value) : ""
-                                            color: win.ink
-                                            font.pixelSize: 15
-                                            font.bold: true
-                                        }
-                                        Repeater {
-                                            model: tip.entry ? tip.entry.parts : []
-                                            delegate: RowLayout {
-                                                required property var modelData
-                                                spacing: 8
-                                                Rectangle {
-                                                    implicitWidth: 6
-                                                    implicitHeight: 6
-                                                    radius: 3
-                                                    color: win.providerColor(modelData.provider)
-                                                }
+                                            ColumnLayout {
+                                                id: tipBody
+                                                x: 10
+                                                y: 8
+                                                width: tip.width - 20
+                                                spacing: 0
                                                 Label {
-                                                    text: win.providerLabel(modelData.provider)
+                                                    Layout.bottomMargin: 4
+                                                    text: tip.visible ? win.chartTooltipPeriod(backend.buckets[tip.index]) : ""
                                                     color: win.muted
                                                     font.pixelSize: 12
-                                                    Layout.fillWidth: true
-                                                    Layout.minimumWidth: 90
                                                 }
-                                                Label {
-                                                    text: win.formatMetric(modelData.value)
-                                                    color: win.ink
-                                                    font.pixelSize: 12
+                                                Repeater {
+                                                    model: chart.series.providers
+                                                    delegate: RowLayout {
+                                                        required property string modelData
+                                                        Layout.fillWidth: true
+                                                        spacing: 12
+                                                        RowLayout {
+                                                            spacing: 6
+                                                            Rectangle {
+                                                                implicitWidth: 8
+                                                                implicitHeight: 8
+                                                                radius: 4
+                                                                color: win.providerColor(modelData)
+                                                            }
+                                                            Label {
+                                                                text: win.providerLabel(modelData)
+                                                                color: win.muted
+                                                                font.pixelSize: 12
+                                                            }
+                                                        }
+                                                        Label {
+                                                            Layout.fillWidth: true
+                                                            horizontalAlignment: Text.AlignRight
+                                                            text: tip.visible ? win.chartMetric(chart.series.values[modelData][tip.index]) : ""
+                                                            color: win.ink
+                                                            font.pixelSize: 12
+                                                        }
+                                                    }
+                                                }
+                                                Rectangle {
+                                                    Layout.fillWidth: true
+                                                    Layout.topMargin: 4
+                                                    implicitHeight: 1
+                                                    color: win.chartGrid
+                                                }
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Layout.topMargin: 4
+                                                    spacing: 12
+                                                    Label {
+                                                        text: qsTr("Total")
+                                                        color: win.muted
+                                                        font.pixelSize: 12
+                                                    }
+                                                    Label {
+                                                        Layout.fillWidth: true
+                                                        horizontalAlignment: Text.AlignRight
+                                                        text: tip.visible ? win.chartMetric(chart.columnTotal(tip.index)) : ""
+                                                        color: win.ink
+                                                        font.pixelSize: 12
+                                                    }
                                                 }
                                             }
+                                        }
+                                    }
+
+                                    // First, middle, and last period, spread like CSS justify-between.
+                                    Item {
+                                        id: axisRow
+                                        x: 64
+                                        y: plotArea.height + 4
+                                        width: chart.width - x
+                                        height: firstTick.implicitHeight
+                                        Label {
+                                            id: firstTick
+                                            text: win.chartPeriod(backend.buckets[0])
+                                            color: win.muted
+                                            font.pixelSize: 10
+                                            font.capitalization: Font.AllUppercase
+                                        }
+                                        Label {
+                                            x: firstTick.width + (lastTick.x - firstTick.width - width) / 2
+                                            text: win.chartPeriod(backend.buckets[Math.floor(chart.count / 2)])
+                                            color: win.muted
+                                            font.pixelSize: 10
+                                            font.capitalization: Font.AllUppercase
+                                        }
+                                        Label {
+                                            id: lastTick
+                                            anchors.right: parent.right
+                                            text: win.chartPeriod(backend.buckets[chart.count - 1])
+                                            color: win.muted
+                                            font.pixelSize: 10
+                                            font.capitalization: Font.AllUppercase
                                         }
                                     }
                                 }
