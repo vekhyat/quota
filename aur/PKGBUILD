@@ -1,6 +1,6 @@
 # Maintainer: Vekhyat Jain <vekhyatjain123 at gmail dot com>
 pkgname=quota
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc='Show Claude, Codex, and Grok limits, usage, and cost'
 arch=('x86_64' 'aarch64')
@@ -10,7 +10,7 @@ depends=('qt6-base>=6.4' 'qt6-declarative>=6.4' 'qt6-wayland' 'gcc-libs' 'glibc'
 # Both packages install /usr/bin/quota.
 conflicts=('quota-tools')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('6538806191883b314f1ec18bc2b2b8adfc253fc0c2443cb5d0d9f400e263ed5d')
+sha256sums=('6a5789786bf473b56b5aebd5e346cc59ef025b3b9f19c960009206234906b6e7')
 
 build() {
   cd "$pkgname-$pkgver"
