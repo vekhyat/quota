@@ -37,7 +37,7 @@ int main(int argc, char *argv[])
     font.setPixelSize(14);
     app.setFont(font);
     app.setApplicationName("quota");
-    app.setApplicationVersion("0.4.0");
+    app.setApplicationVersion("0.4.1");
     app.setDesktopFileName("quota");
     app.setWindowIcon(QIcon::fromTheme("quota"));
     QQuickStyle::setStyle("Material");

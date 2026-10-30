@@ -691,7 +691,7 @@ void Backend::readCodexAppServer(const QString &home, int generation)
     QTimer::singleShot(15000, process, [finish] { finish({}); });
     connect(process, &QProcess::started, this, [process] {
         process->write("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"quota\",\"title\":\"Quota\","
-                       "\"version\":\"0.4.0\"},\"capabilities\":{\"experimentalApi\":true}}}\n");
+                       "\"version\":\"0.4.1\"},\"capabilities\":{\"experimentalApi\":true}}}\n");
     });
     process->start(m_codexBin, {"app-server"});
 }
